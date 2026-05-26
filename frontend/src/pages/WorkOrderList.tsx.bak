@@ -1,0 +1,814 @@
+﻿/**
+ * 宸ュ崟鍒楄〃椤甸潰
+ */
+import { useState, useEffect } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Table, Tag, Button, Space, message, Modal, Form, Input, Select, Alert, Dropdown, DatePicker, Typography } from 'antd'
+import type { MenuProps } from 'antd'
+import { SearchOutlined, DownloadOutlined, FileExcelOutlined, FilePdfOutlined, SettingOutlined } from '@ant-design/icons'
+import { useQuery, useMutation, useQueryClient } from 'react-query'
+import { workOrderService, WorkOrder } from '../services/workOrder'
+import { taskService } from '../services/task'
+import { exportService } from '../services/export'
+import { useAuth } from '../contexts/AuthContext'
+import { UserRole } from '../types/user'
+import UserSelector from '../components/UserSelector'
+import GroupMemberSelector from '../components/GroupMemberSelector'
+import EmptyState from '../components/EmptyState'
+import dayjs from 'dayjs'
+import { extractErrorMessage } from '../utils/errorHandler'
+
+const { RangePicker } = DatePicker
+const { Title } = Typography
+
+const WorkOrderStatusLabels: Record<string, string> = {
+  pending_assign: '待转派',
+  pending_accept: '待接单',
+  accepted: '已接单',
+  in_progress: '进行中',
+  completed: '已拜访',
+  cancelled: '已取消',
+  // 兼容旧数据
+  pending: '待接单',
+}
+
+const WorkOrderStatusColors: Record<string, string> = {
+  pending_assign: 'orange',
+  pending_accept: 'orange',
+  accepted: 'blue',
+  in_progress: 'processing',
+  completed: 'success',
+  cancelled: 'default',
+  // 鍏煎鏃ф暟鎹?
+  pending: 'orange',
+}
+
+const WorkOrderList = () => {
+  const { user, getCurrentRole } = useAuth()
+  const currentRole = getCurrentRole()
+  const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const queryClient = useQueryClient()
+  const [assignModalVisible, setAssignModalVisible] = useState(false)
+  const [cancelModalVisible, setCancelModalVisible] = useState(false)
+  const [selectedWorkOrder, setSelectedWorkOrder] = useState<WorkOrder | null>(null)
+  const [assignForm] = Form.useForm()
+  const [cancelForm] = Form.useForm()
+  const [searchForm] = Form.useForm<{
+    search?: string
+    status?: string
+    task_id?: number
+    team_leader_id?: number
+    member_id?: number
+    date_range?: [dayjs.Dayjs, dayjs.Dayjs]
+  }>()
+  
+  // 浠?URL 鍙傛暟璇诲彇鍒嗛〉鍜岀瓫閫夋潯浠?
+  const urlPage = searchParams.get('page') ? parseInt(searchParams.get('page')!, 10) : 1
+  const urlPageSize = searchParams.get('page_size') ? parseInt(searchParams.get('page_size')!, 10) : 10
+  const urlSearch = searchParams.get('search') || ''
+  const urlStatus = searchParams.get('status') || undefined
+  const urlTaskId = searchParams.get('task_id') ? parseInt(searchParams.get('task_id')!, 10) : undefined
+  const urlTeamLeaderId = searchParams.get('team_leader_id') ? parseInt(searchParams.get('team_leader_id')!, 10) : undefined
+  const urlMemberId = searchParams.get('member_id') ? parseInt(searchParams.get('member_id')!, 10) : undefined
+  const urlStartDate = searchParams.get('start_date') || undefined
+  const urlEndDate = searchParams.get('end_date') || undefined
+  
+  const [pagination, setPagination] = useState({ page: urlPage, page_size: urlPageSize })
+  const [searchText, setSearchText] = useState(urlSearch)
+  const [statusFilter, setStatusFilter] = useState<string | undefined>(urlStatus)
+  const [taskIdFilter, setTaskIdFilter] = useState<number | undefined>(urlTaskId)
+  const [teamLeaderIdFilter, setTeamLeaderIdFilter] = useState<number | undefined>(urlTeamLeaderId)
+  const [memberIdFilter, setMemberIdFilter] = useState<number | undefined>(urlMemberId)
+  const [startDate, setStartDate] = useState<string | undefined>(urlStartDate)
+  const [endDate, setEndDate] = useState<string | undefined>(urlEndDate)
+  
+  // 褰?URL 鍙傛暟鍙樺寲鏃讹紝鏇存柊鐘舵€?
+  useEffect(() => {
+    setPagination({ page: urlPage, page_size: urlPageSize })
+    setSearchText(urlSearch)
+    setStatusFilter(urlStatus)
+    setTaskIdFilter(urlTaskId)
+    setTeamLeaderIdFilter(urlTeamLeaderId)
+    setMemberIdFilter(urlMemberId)
+    setStartDate(urlStartDate)
+    setEndDate(urlEndDate)
+    // 鍚屾琛ㄥ崟鍊?
+    if (urlSearch || urlStatus || urlTaskId || urlTeamLeaderId || urlMemberId || urlStartDate || urlEndDate) {
+      searchForm.setFieldsValue({
+        search: urlSearch || undefined,
+        status: urlStatus,
+        task_id: urlTaskId,
+        team_leader_id: urlTeamLeaderId,
+        member_id: urlMemberId,
+        date_range: urlStartDate && urlEndDate ? [dayjs(urlStartDate), dayjs(urlEndDate)] : undefined,
+      })
+    }
+  }, [urlPage, urlPageSize, urlSearch, urlStatus, urlTaskId, urlTeamLeaderId, urlMemberId, urlStartDate, urlEndDate, searchForm])
+
+  // 鑾峰彇浠诲姟鍒楄〃锛堢敤浜庣瓫閫夛級
+  const { data: tasksData } = useQuery(
+    ['tasks', 'all'],
+    () => taskService.getTasks({ page_size: 100 }),
+    {
+      enabled: true,
+    }
+  )
+  const tasks = tasksData?.items || []
+
+  const { data: workOrdersData, isLoading, error } = useQuery(
+    ['workOrders', pagination.page, pagination.page_size, searchText, statusFilter, taskIdFilter, teamLeaderIdFilter, memberIdFilter, startDate, endDate],
+    () => workOrderService.getWorkOrders({
+      page: pagination.page,
+      page_size: pagination.page_size,
+      search: searchText || undefined,
+      status: statusFilter,
+      task_id: taskIdFilter,
+      team_leader_id: teamLeaderIdFilter,
+      member_id: memberIdFilter,
+      start_date: startDate,
+      end_date: endDate,
+    })
+  )
+
+  const workOrders = workOrdersData?.items || []
+  const total = workOrdersData?.total || 0
+
+  const assignMutation = useMutation(
+    ({ id, member_id }: { id: number; member_id: number }) =>
+      workOrderService.assignWorkOrder(id, { member_id }),
+    {
+      onSuccess: () => {
+        message.success('杞淳鎴愬姛')
+        setAssignModalVisible(false)
+        assignForm.resetFields()
+        setSelectedWorkOrder(null)
+        // 浣跨敤 refetchQueries 淇濇寔褰撳墠鍒嗛〉鐘舵€侊紝鑰屼笉鏄?invalidateQueries
+        queryClient.refetchQueries(['workOrders', pagination.page, pagination.page_size, searchText, statusFilter, taskIdFilter, teamLeaderIdFilter, memberIdFilter, startDate, endDate])
+      },
+      onError: (error: any) => {
+        message.error(extractErrorMessage(error, '杞淳澶辫触'))
+      },
+    }
+  )
+
+  const acceptMutation = useMutation(
+    (id: number) => workOrderService.acceptWorkOrder(id),
+    {
+      onSuccess: () => {
+        message.success('鎺ュ崟鎴愬姛')
+        // 浣跨敤 refetchQueries 淇濇寔褰撳墠鍒嗛〉鐘舵€?
+        queryClient.refetchQueries(['workOrders', pagination.page, pagination.page_size, searchText, statusFilter, taskIdFilter, teamLeaderIdFilter, memberIdFilter, startDate, endDate])
+        queryClient.invalidateQueries('notificationUnreadCount')
+        queryClient.invalidateQueries('notificationsRecent')
+      },
+      onError: (error: any) => {
+        message.error(extractErrorMessage(error, '鎺ュ崟澶辫触'))
+      },
+    }
+  )
+
+  const completeMutation = useMutation(
+    (id: number) => workOrderService.completeWorkOrder(id),
+    {
+      onSuccess: () => {
+        message.success('宸ュ崟宸插畬鎴?)
+        // 浣跨敤 refetchQueries 淇濇寔褰撳墠鍒嗛〉鐘舵€?
+        queryClient.refetchQueries(['workOrders', pagination.page, pagination.page_size, searchText, statusFilter, taskIdFilter, teamLeaderIdFilter, memberIdFilter, startDate, endDate])
+        queryClient.invalidateQueries('notificationUnreadCount')
+        queryClient.invalidateQueries('notificationsRecent')
+      },
+      onError: (error: any) => {
+        message.error(extractErrorMessage(error, '瀹屾垚宸ュ崟澶辫触'))
+      },
+    }
+  )
+
+  const cancelMutation = useMutation(
+    ({ id, data }: { id: number; data: { cancellation_reason?: string } }) =>
+      workOrderService.cancelWorkOrder(id, data),
+    {
+      onSuccess: () => {
+        message.success('宸ュ崟宸插彇娑?)
+        setCancelModalVisible(false)
+        cancelForm.resetFields()
+        setSelectedWorkOrder(null)
+        // 浣跨敤 refetchQueries 淇濇寔褰撳墠鍒嗛〉鐘舵€?
+        queryClient.refetchQueries(['workOrders', pagination.page, pagination.page_size, searchText, statusFilter, taskIdFilter, teamLeaderIdFilter, memberIdFilter, startDate, endDate])
+        queryClient.invalidateQueries('notificationUnreadCount')
+        queryClient.invalidateQueries('notificationsRecent')
+      },
+      onError: (error: any) => {
+        message.error(extractErrorMessage(error, '鍙栨秷宸ュ崟澶辫触'))
+      },
+    }
+  )
+
+  const handleAssign = (record: WorkOrder) => {
+    setSelectedWorkOrder(record)
+    setAssignModalVisible(true)
+  }
+
+  const handleAccept = (id: number) => {
+    acceptMutation.mutate(id)
+  }
+
+  const handleComplete = (id: number) => {
+    Modal.confirm({
+      title: '纭瀹屾垚宸ュ崟',
+      content: (
+        <div>
+          <p>纭畾瑕佸畬鎴愭宸ュ崟鍚楋紵瀹屾垚鍚庡皢閫氱煡鐩稿叧鐢ㄦ埛銆?/p>
+          <p style={{ color: '#ff4d4f', marginTop: 8 }}>
+            <strong>娉ㄦ剰锛?/strong>瀹屾垚鍚庣殑宸ュ崟灏嗘棤娉曞垱寤烘嫓璁挎棩蹇楋紝璇风‘淇濆凡瀹屾垚鎵€鏈夋嫓璁胯褰曞悗鍐嶅畬鎴愬伐鍗曘€?
+          </p>
+        </div>
+      ),
+      okText: '纭',
+      cancelText: '鍙栨秷',
+      onOk: () => {
+        completeMutation.mutate(id)
+      },
+    })
+  }
+
+  const handleCancel = (record: WorkOrder) => {
+    setSelectedWorkOrder(record)
+    setCancelModalVisible(true)
+    cancelForm.resetFields()
+  }
+
+  const revokeMutation = useMutation(
+    (id: number) => workOrderService.revokeWorkOrder(id),
+    {
+      onSuccess: () => {
+        message.success('鎾ゅ洖鎴愬姛')
+        queryClient.refetchQueries(['workOrders', pagination.page, pagination.page_size, searchText, statusFilter, taskIdFilter, teamLeaderIdFilter, memberIdFilter, startDate, endDate])
+        queryClient.invalidateQueries('notificationUnreadCount')
+        queryClient.invalidateQueries('notificationsRecent')
+      },
+      onError: (error: any) => {
+        message.error(extractErrorMessage(error, '鎾ゅ洖澶辫触'))
+      },
+    }
+  )
+
+  const handleRevoke = (record: WorkOrder) => {
+    Modal.confirm({
+      title: '纭鎾ゅ洖宸ュ崟',
+      content: (
+        <div>
+          <p>纭畾瑕佹挙鍥炴宸ュ崟鐨勮浆娲惧悧锛熸挙鍥炲悗锛?/p>
+          <ul style={{ marginTop: 8, paddingLeft: 20 }}>
+            <li>宸ュ崟灏嗛噸缃负銆屽緟杞淳銆嶇姸鎬?/li>
+            <li>鎴愬憳鍏崇郴灏嗚娓呯┖</li>
+            <li>鍘熸垚鍛樺皢鏀跺埌鎾ゅ洖閫氱煡</li>
+            {record.status === 'accepted' && (
+              <li style={{ color: '#ff4d4f' }}>
+                <strong>娉ㄦ剰锛?/strong>鎴愬憳宸叉帴鍗曪紝鎾ゅ洖鍚庡皢娓呯┖鎺ュ崟璁板綍
+              </li>
+            )}
+          </ul>
+        </div>
+      ),
+      okText: '纭鎾ゅ洖',
+      cancelText: '鍙栨秷',
+      okButtonProps: { danger: true },
+      onOk: () => {
+        revokeMutation.mutate(record.id)
+      },
+    })
+  }
+
+  const handleTableChange = (page: number, pageSize: number) => {
+    setPagination({ page, page_size: pageSize })
+    // 鏇存柊 URL 鍙傛暟浠ヤ繚鎸佸垎椤电姸鎬?
+    const newParams = new URLSearchParams(searchParams)
+    newParams.set('page', page.toString())
+    newParams.set('page_size', pageSize.toString())
+    setSearchParams(newParams, { replace: true })
+  }
+
+  const handleSearch = (values: {
+    search?: string
+    status?: string
+    task_id?: number
+    team_leader_id?: number
+    member_id?: number
+    date_range?: [dayjs.Dayjs, dayjs.Dayjs]
+  }): void => {
+    setSearchText(values.search || '')
+    setStatusFilter(values.status)
+    setTaskIdFilter(values.task_id)
+    setTeamLeaderIdFilter(values.team_leader_id)
+    setMemberIdFilter(values.member_id)
+    
+    // 澶勭悊鏃ユ湡鑼冨洿
+    if (values.date_range && values.date_range.length === 2) {
+      setStartDate(values.date_range[0].format('YYYY-MM-DD'))
+      setEndDate(values.date_range[1].format('YYYY-MM-DD'))
+    } else {
+      setStartDate(undefined)
+      setEndDate(undefined)
+    }
+    
+    setPagination({ page: 1, page_size: pagination.page_size })
+    // 鏇存柊 URL 鍙傛暟锛屾悳绱㈡椂閲嶇疆鍒扮涓€椤?
+    const newParams = new URLSearchParams()
+    if (values.search) newParams.set('search', values.search)
+    if (values.status) newParams.set('status', values.status)
+    if (values.task_id) newParams.set('task_id', values.task_id.toString())
+    if (values.team_leader_id) newParams.set('team_leader_id', values.team_leader_id.toString())
+    if (values.member_id) newParams.set('member_id', values.member_id.toString())
+    if (values.date_range && values.date_range.length === 2) {
+      newParams.set('start_date', values.date_range[0].format('YYYY-MM-DD'))
+      newParams.set('end_date', values.date_range[1].format('YYYY-MM-DD'))
+    }
+    newParams.set('page', '1')
+    newParams.set('page_size', pagination.page_size.toString())
+    setSearchParams(newParams, { replace: true })
+  }
+
+  const columns = [
+    {
+      title: '宸ュ崟缂栧彿',
+      dataIndex: 'work_order_no',
+      key: 'work_order_no',
+      width: 220,
+      ellipsis: true,
+    },
+    {
+      title: '浠诲姟鍚嶇О',
+      key: 'task_name',
+      width: 140,
+      ellipsis: true,
+      render: (_: any, record: WorkOrder) => (
+        record.task_name ? (
+          <Button 
+            type="link" 
+            style={{ padding: 0 }}
+            onClick={() => navigate(`/tasks/${record.task_id}`)}
+          >
+            {record.task_name}
+          </Button>
+        ) : (
+          <span>浠诲姟 #{record.task_id}</span>
+        )
+      ),
+    },
+    {
+      title: '瀹㈡埛鍚嶇О',
+      key: 'customer_unit',
+      width: 200,
+      ellipsis: true,
+      render: (_: any, record: WorkOrder) => (
+        record.customer_unit || '-'
+      ),
+    },
+    {
+      title: '瀹㈡埛鏉ユ簮',
+      key: 'customer_source',
+      width: 160,
+      ellipsis: true,
+      render: (_: any, record: WorkOrder) => (
+        record.customer_source || '-'
+      ),
+    },
+    {
+      title: '鍙戣捣閮ㄩ棬',
+      key: 'sales_unit',
+      width: 180,
+      ellipsis: true,
+      render: (_: any, record: WorkOrder) => {
+        // 鍘婚櫎"閿€鍞崟浣?- "鍓嶇紑鐨勮緟鍔╁嚱鏁?
+        const removeSalesUnitPrefix = (unit: string): string => {
+          if (!unit) return unit
+          // 鍘婚櫎"閿€鍞崟浣?"鎴?閿€鍞崟浣?- "鍓嶇紑
+          return unit.replace(/^閿€鍞崟浣峔s*[-锛峕\s*/i, '').trim()
+        }
+        
+        // 浼樺厛鏄剧ず鎻愪氦浜烘墍灞炵殑閿€鍞崟浣?
+        if (record.sales_contact_unit) {
+          const displayUnit = removeSalesUnitPrefix(record.sales_contact_unit)
+          return <Tag>{displayUnit}</Tag>
+        }
+        // 濡傛灉娌℃湁鎻愪氦浜洪攢鍞崟浣嶏紝鍥為€€鍒颁换鍔＄殑閿€鍞崟浣嶏紙鍏煎鏃ф暟鎹級
+        if (record.task_sales_unit) {
+          const units = record.task_sales_unit.split(',').map((unit: string) => {
+            const trimmed = unit.trim()
+            return removeSalesUnitPrefix(trimmed)
+          }).filter(Boolean)
+          return (
+            <Space wrap>
+              {units.map((unit: string, index: number) => (
+                <Tag key={index}>{unit}</Tag>
+              ))}
+            </Space>
+          )
+        }
+        return '-'
+      },
+    },
+    {
+      title: '缁勯暱',
+      key: 'team_leader',
+      width: 120,
+      ellipsis: true,
+      render: (_: any, record: WorkOrder) => (
+        record.team_leader_name || `鐢ㄦ埛 #${record.team_leader_id}`
+      ),
+    },
+    {
+      title: '鎴愬憳',
+      key: 'member',
+      width: 120,
+      ellipsis: true,
+      render: (_: any, record: WorkOrder) => (
+        record.member_name || (record.member_id ? `鐢ㄦ埛 #${record.member_id}` : '-')
+      ),
+    },
+    {
+      title: '鐘舵€?,
+      dataIndex: 'status',
+      key: 'status',
+      width: 110,
+      render: (status: string) => (
+        <Tag color={WorkOrderStatusColors[status]}>
+          {WorkOrderStatusLabels[status] || status}
+        </Tag>
+      ),
+    },
+    {
+      title: '鎷滆鏃堕棿',
+      dataIndex: 'expected_visit_time',
+      key: 'expected_visit_time',
+      width: 160,
+      render: (date: string) => date ? dayjs(date).format('YYYY-MM-DD HH:mm') : '-',
+    },
+    {
+      title: '鎿嶄綔',
+      key: 'action',
+      width: 150,
+      fixed: 'right' as const,
+      align: 'center' as const,
+      render: (_: any, record: WorkOrder) => {
+        // 鍒ゆ柇鏄惁鍙互杞淳锛氱粍闀胯鑹诧紝鐘舵€佷负寰呰浆娲撅紝涓攎ember_id涓虹┖锛屼笖team_leader_id绛変簬褰撳墠鐢ㄦ埛ID
+        const canAssign = 
+          currentRole?.role === 'team_leader' && 
+          record.status === 'pending_assign' && 
+          !record.member_id &&
+          record.team_leader_id === user?.id
+
+        // 鍒ゆ柇鏄惁鍙互鎺ュ崟锛氭垚鍛樿鑹诧紝鐘舵€佷负寰呮帴鍗曪紝涓攎ember_id绛変簬褰撳墠鐢ㄦ埛ID
+        const canAccept = 
+          currentRole?.role === 'member' && 
+          record.status === 'pending_accept' && 
+          record.member_id === user?.id
+
+        // 鍒ゆ柇鏄惁鍙互瀹屾垚锛氭垚鍛樻垨缁勯暱锛岀姸鎬佷负宸叉帴鍗曟垨杩涜涓?
+        const canComplete = 
+          record.status !== 'cancelled' &&
+          record.status !== 'completed' &&
+          ((currentRole?.role === 'member' && 
+            (record.status === 'accepted' || record.status === 'in_progress') && 
+            record.member_id === user?.id) ||
+           (currentRole?.role === 'team_leader' && 
+            (record.status === 'accepted' || record.status === 'in_progress') && 
+            record.team_leader_id === user?.id))
+
+        // 鍒ゆ柇鏄惁鍙互鎾ゅ洖锛氱粍闀胯鑹诧紝鐘舵€佷负寰呮帴鍗曟垨宸叉帴鍗曪紝涓旀湁鎴愬憳锛屼笖team_leader_id绛変簬褰撳墠鐢ㄦ埛ID
+        const canRevoke = 
+          currentRole?.role === 'team_leader' &&
+          (record.status === 'pending_accept' || record.status === 'accepted') &&
+          record.team_leader_id === user?.id &&
+          record.member_id
+
+        // 鍒ゆ柇鏄惁鍙互鍙栨秷锛氱粍闀挎垨鎴愬憳
+        const canCancel = 
+          record.status !== 'cancelled' &&
+          record.status !== 'completed' &&
+          ((currentRole?.role === 'team_leader' && 
+            (record.status === 'pending_assign' || record.status === 'pending_accept') &&
+            record.team_leader_id === user?.id) ||
+           (currentRole?.role === 'member' &&
+            (record.status === 'pending_accept' || record.status === 'accepted' || record.status === 'in_progress') &&
+            record.member_id === user?.id))
+
+        // 鏋勫缓鑿滃崟椤?
+        const menuItems: MenuProps['items'] = [
+          {
+            key: 'view',
+            label: '鏌ョ湅璇︽儏',
+            onClick: () => {
+              // 灏嗗綋鍓嶅垎椤典俊鎭綔涓烘煡璇㈠弬鏁颁紶閫?
+              const params = new URLSearchParams(searchParams)
+              navigate(`/work-orders/${record.id}?${params.toString()}`)
+            },
+          },
+        ]
+
+        // 杞淳鎸夐挳锛氱粍闀垮彲瑙?
+        if (currentRole?.role === 'team_leader') {
+          menuItems.push({
+            key: 'assign',
+            label: '杞淳',
+            disabled: !canAssign,
+            onClick: () => canAssign && handleAssign(record),
+          } as NonNullable<MenuProps['items']>[number])
+        }
+
+        // 鎾ゅ洖鎸夐挳锛氱粍闀垮彲瑙?
+        if (currentRole?.role === 'team_leader') {
+          menuItems.push({
+            key: 'revoke',
+            label: '鎾ゅ洖',
+            disabled: !canRevoke,
+            danger: true,
+            onClick: () => canRevoke && handleRevoke(record),
+          } as NonNullable<MenuProps['items']>[number])
+        }
+
+        // 鎺ュ崟鎸夐挳锛氭垚鍛樺彲瑙?
+        if (currentRole?.role === 'member') {
+          menuItems.push({
+            key: 'accept',
+            label: '鎺ュ崟',
+            disabled: !canAccept,
+            onClick: () => canAccept && handleAccept(record.id),
+          } as NonNullable<MenuProps['items']>[number])
+        }
+
+        // 瀹屾垚鎸夐挳锛氭垚鍛樺拰缁勯暱閮藉彲瑙?
+        if (currentRole?.role === 'member' || currentRole?.role === 'team_leader') {
+          menuItems.push({
+            key: 'complete',
+            label: '瀹屾垚',
+            disabled: !canComplete,
+            danger: true,
+            onClick: () => canComplete && handleComplete(record.id),
+          } as NonNullable<MenuProps['items']>[number])
+        }
+
+        // 鍙栨秷鎸夐挳锛氭垚鍛樺拰缁勯暱閮藉彲瑙?
+        if (currentRole?.role === 'member' || currentRole?.role === 'team_leader') {
+          menuItems.push({
+            key: 'cancel',
+            label: '鍙栨秷',
+            disabled: !canCancel,
+            danger: true,
+            onClick: () => canCancel && handleCancel(record),
+          } as NonNullable<MenuProps['items']>[number])
+        }
+
+        return (
+          <Dropdown
+            menu={{ items: menuItems }}
+            trigger={['click']}
+            placement="bottomRight"
+          >
+            <Button type="text" icon={<SettingOutlined />} />
+          </Dropdown>
+        )
+      },
+    },
+  ]
+
+  return (
+    <div>
+      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Title level={3} style={{ margin: 0 }}>宸ュ崟绠＄悊</Title>
+        <Dropdown
+          menu={{
+            items: [
+              {
+                key: 'excel',
+                label: '瀵煎嚭Excel',
+                icon: <FileExcelOutlined />,
+                onClick: async () => {
+                  try {
+                    await exportService.exportWorkOrdersExcel()
+                    message.success('瀵煎嚭鎴愬姛')
+                  } catch (error) {
+                    const errorMessage = error instanceof Error ? error.message : '瀵煎嚭澶辫触'
+                    message.error(errorMessage)
+                  }
+                },
+              },
+              {
+                key: 'pdf',
+                label: '瀵煎嚭PDF',
+                icon: <FilePdfOutlined />,
+                onClick: async () => {
+                  try {
+                    await exportService.exportWorkOrdersPdf()
+                    message.success('瀵煎嚭鎴愬姛')
+                  } catch (error) {
+                    const errorMessage = error instanceof Error ? error.message : '瀵煎嚭澶辫触'
+                    message.error(errorMessage)
+                  }
+                },
+              },
+            ],
+          }}
+        >
+          <Button icon={<DownloadOutlined />}>
+            瀵煎嚭鏁版嵁
+          </Button>
+        </Dropdown>
+      </div>
+
+      {/* 鎼滅储鍜岀瓫閫?*/}
+      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <Form
+          form={searchForm}
+          layout="inline"
+          onFinish={handleSearch}
+          style={{ flex: 1 }}
+        >
+          <Form.Item name="search">
+            <Input
+              placeholder="鎼滅储宸ュ崟缂栧彿"
+              prefix={<SearchOutlined />}
+              allowClear
+              style={{ width: 250 }}
+            />
+          </Form.Item>
+          <Form.Item name="status">
+            <Select placeholder="鐘舵€佺瓫閫? allowClear style={{ width: 150 }}>
+              {Object.entries(WorkOrderStatusLabels).map(([value, label]) => (
+                <Select.Option key={value} value={value}>
+                  {label}
+                </Select.Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Form.Item name="task_id">
+            <Select
+              placeholder="鎵€灞炰换鍔?
+              allowClear
+              showSearch
+              style={{ width: 200 }}
+              filterOption={(input, option) =>
+                String(option?.label ?? '').toLowerCase().includes(input.toLowerCase())
+              }
+            >
+              {tasks.map((task: any) => (
+                <Select.Option key={task.id} value={task.id} label={task.task_name}>
+                  {task.task_name}
+                </Select.Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Form.Item name="team_leader_id">
+            <UserSelector
+              role={UserRole.TEAM_LEADER}
+              placeholder="缁勯暱"
+              allowClear
+              style={{ width: 180 }}
+            />
+          </Form.Item>
+          <Form.Item name="member_id">
+            <UserSelector
+              placeholder="鎴愬憳"
+              allowClear
+              style={{ width: 180 }}
+            />
+          </Form.Item>
+          <Form.Item name="date_range">
+            <RangePicker 
+              placeholder={['鍒涘缓寮€濮嬫棩鏈?, '鍒涘缓缁撴潫鏃ユ湡']}
+              style={{ width: 280 }}
+            />
+          </Form.Item>
+        </Form>
+        <Button type="primary" onClick={() => searchForm.submit()} icon={<SearchOutlined />}>
+          鎼滅储
+        </Button>
+      </div>
+
+      {!!error && (
+        <Alert
+          message="鍔犺浇澶辫触"
+          description={extractErrorMessage(error, '鏈煡閿欒')}
+          type="error"
+          showIcon
+          closable
+          style={{ marginBottom: 16 }}
+          action={
+            <Button size="small" onClick={() => window.location.reload()}>
+              鍒锋柊
+            </Button>
+          }
+        />
+      )}
+
+      <Table
+        columns={columns}
+        dataSource={workOrders}
+        loading={isLoading}
+        rowKey="id"
+        scroll={{ x: 'max-content' }}
+        pagination={{
+          current: pagination.page,
+          pageSize: pagination.page_size,
+          total: total,
+          showSizeChanger: true,
+          showTotal: (total) => `鍏?${total} 鏉,
+          onChange: handleTableChange,
+          onShowSizeChange: handleTableChange,
+        }}
+        locale={{
+          emptyText: <EmptyState description="鏆傛棤宸ュ崟鏁版嵁" />,
+        }}
+      />
+
+      {/* 杞淳妯℃€佹 */}
+      <Modal
+        title="杞淳宸ュ崟缁欐垚鍛?
+        open={assignModalVisible}
+        onCancel={() => {
+          setAssignModalVisible(false)
+          assignForm.resetFields()
+          setSelectedWorkOrder(null)
+        }}
+        onOk={() => assignForm.submit()}
+        confirmLoading={assignMutation.isLoading}
+      >
+        <Form
+          form={assignForm}
+          onFinish={(values) => {
+            if (selectedWorkOrder) {
+              assignMutation.mutate({ id: selectedWorkOrder.id, member_id: values.member_id })
+            }
+          }}
+          layout="vertical"
+        >
+          <Form.Item
+            name="member_id"
+            label="閫夋嫨鎴愬憳"
+            rules={[{ required: true, message: '璇烽€夋嫨鎴愬憳' }]}
+          >
+            {currentRole?.role === 'team_leader' ? (
+              <GroupMemberSelector placeholder="璇烽€夋嫨缁勫唴鎴愬憳" />
+            ) : (
+              <UserSelector 
+                role={UserRole.MEMBER} 
+                placeholder="璇烽€夋嫨鎴愬憳" 
+              />
+            )}
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 鍙栨秷宸ュ崟妯℃€佹 */}
+      <Modal
+        title="鍙栨秷宸ュ崟"
+        open={cancelModalVisible}
+        onCancel={() => {
+          setCancelModalVisible(false)
+          cancelForm.resetFields()
+          setSelectedWorkOrder(null)
+        }}
+        onOk={() => cancelForm.submit()}
+        confirmLoading={cancelMutation.isLoading}
+        okText="纭鍙栨秷"
+        cancelText="鍙栨秷"
+        okButtonProps={{ danger: true }}
+      >
+        <Form
+          form={cancelForm}
+          onFinish={(values) => {
+            if (selectedWorkOrder) {
+              cancelMutation.mutate({
+                id: selectedWorkOrder.id,
+                data: {
+                  cancellation_reason: values.cancellation_reason || undefined,
+                },
+              })
+            }
+          }}
+          layout="vertical"
+        >
+          <Form.Item
+            name="cancellation_reason"
+            label="鍙栨秷鍘熷洜锛堝彲閫夛級"
+            help="濉啓鍙栨秷鍘熷洜鏈夊姪浜庤拷婧拰鍒嗘瀽锛屽缓璁～鍐?
+          >
+            <Input.TextArea
+              rows={4}
+              placeholder="璇疯緭鍏ュ彇娑堝師鍥狅紝渚嬪锛氬鎴烽渶姹傚彉鏇淬€佹椂闂村啿绐佺瓑"
+              maxLength={500}
+              showCount
+            />
+          </Form.Item>
+          <div style={{ color: '#ff4d4f', marginTop: 8 }}>
+            <strong>娉ㄦ剰锛?/strong>鍙栨秷鍚庣殑宸ュ崟灏嗘棤娉曠户缁搷浣滐紝璇风‘璁ゅ悗鍐嶆彁浜ゃ€?
+          </div>
+        </Form>
+      </Modal>
+    </div>
+  )
+}
+
+export default WorkOrderList
+

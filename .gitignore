@@ -1,0 +1,12 @@
+.idea/
+.vscode/
+backend/logs/
+*.log
+__pycache__/
+*.pyc
+frontend/node_modules/
+frontend/dist/
+frontend/dist.7z
+backend/.env
+backend/uploads/
+*.patch

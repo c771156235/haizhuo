@@ -1,0 +1,46 @@
+.statistics-segmented-wrap {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.statistics-segmented {
+  background: #f5f7fb;
+  border-radius: 12px;
+  padding: 6px;
+  width: max-content;
+  min-width: 100%;
+}
+
+.statistics-segmented .ant-segmented-item {
+  border-radius: 10px;
+}
+
+.statistics-segmented .ant-segmented-item-label {
+  min-height: 44px;
+  line-height: 44px;
+  padding: 0 20px;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.statistics-segmented .ant-segmented-item-selected {
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+}
+
+.statistics-segmented .ant-segmented-item-selected .ant-segmented-item-label {
+  color: #1677ff;
+}
+
+.statistics-segmented .ant-segmented-thumb {
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+}
+
+.statistics-segmented .ant-segmented-item:not(.ant-segmented-item-selected) .ant-segmented-item-label {
+  color: #4b5563;
+}
+
+.statistics-segmented .ant-segmented-item:not(.ant-segmented-item-selected):hover .ant-segmented-item-label {
+  color: #334155;
+}

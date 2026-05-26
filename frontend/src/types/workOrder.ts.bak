@@ -1,0 +1,35 @@
+﻿/**
+ * 宸ュ崟绫诲瀷瀹氫箟
+ */
+export enum WorkOrderStatus {
+  PENDING_ASSIGN = 'pending_assign',  // 寰呰浆娲撅紙缁勯暱杩樻湭杞淳缁欐垚鍛橈級
+  PENDING_ACCEPT = 'pending_accept',  // 寰呮帴鍗曪紙宸茶浆娲撅紝绛夊緟鎴愬憳鎺ュ崟锛?
+  ACCEPTED = 'accepted',              // 宸叉帴鍗?
+  IN_PROGRESS = 'in_progress',        // 杩涜涓?
+  COMPLETED = 'completed',            // 宸插畬鎴?
+  CANCELLED = 'cancelled',            // 宸插彇娑?
+}
+
+export const WorkOrderStatusLabels: Record<WorkOrderStatus | string, string> = {
+  [WorkOrderStatus.PENDING_ASSIGN]: '待转派',
+  [WorkOrderStatus.PENDING_ACCEPT]: '待接单',
+  [WorkOrderStatus.ACCEPTED]: '已接单',
+  [WorkOrderStatus.IN_PROGRESS]: '进行中',
+  [WorkOrderStatus.COMPLETED]: '已拜访',
+  [WorkOrderStatus.CANCELLED]: '已取消',
+  // 兼容旧数据
+  'pending': '待接单',
+}
+
+export const WorkOrderStatusColors: Record<WorkOrderStatus | string, string> = {
+  [WorkOrderStatus.PENDING_ASSIGN]: 'orange',
+  [WorkOrderStatus.PENDING_ACCEPT]: 'orange',
+  [WorkOrderStatus.ACCEPTED]: 'blue',
+  [WorkOrderStatus.IN_PROGRESS]: 'processing',
+  [WorkOrderStatus.COMPLETED]: 'success',
+  [WorkOrderStatus.CANCELLED]: 'default',
+  // 鍏煎鏃ф暟鎹?
+  'pending': 'orange',
+}
+
+
