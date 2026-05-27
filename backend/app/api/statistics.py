@@ -3,7 +3,8 @@
 """
 from typing import Optional, List, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+import json
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, and_, or_
 from datetime import datetime, date, timedelta
 from calendar import monthrange
@@ -129,6 +130,113 @@ def _extract_direction_from_display(direction_display: str) -> str:
             return parts[1].strip()  # 提取需求方向部分
     # 如果没有分隔符，直接使用（兼容旧数据或特殊情况）
     return direction_display.strip()
+
+
+def _extract_category_and_direction_from_display(direction_display: str) -> tuple[str, str]:
+    """从显示字符串中提取一级分类与方向/产品名称。"""
+    normalized = (direction_display or "").strip()
+    if not normalized:
+        return "", ""
+    if " - " in normalized:
+        category, direction = normalized.split(" - ", 1)
+        return category.strip(), direction.strip()
+    return normalized, normalized
+
+
+def _build_statistics_categories(option_configs) -> dict[str, list[str]]:
+    """基于启用的选项配置构建分类 -> 需求方向列表。"""
+    categories: dict[str, list[str]] = {}
+    children_map: dict[Optional[int], list] = {}
+
+    for opt in option_configs:
+        children_map.setdefault(opt.parent_id, []).append(opt)
+
+    for child_list in children_map.values():
+        child_list.sort(key=lambda item: (item.sort_order, item.id))
+
+    def add_direction(category: str, direction: str):
+        if not category or not direction:
+            return
+        categories.setdefault(category, [])
+        if direction not in categories[category]:
+            categories[category].append(direction)
+
+    def walk(opt, path_labels: list[str]):
+        current_path = path_labels + [opt.label.strip()]
+        children = children_map.get(opt.id, [])
+        if not children:
+            category = current_path[0]
+            direction = " - ".join(current_path[1:]) if len(current_path) > 1 else current_path[0]
+            add_direction(category, direction)
+            return
+        for child in children:
+            walk(child, current_path)
+
+    for root in children_map.get(None, []):
+        walk(root, [])
+
+    return categories
+
+
+def _iter_value_strings(raw_value: Optional[str]) -> list[str]:
+    """将单值/JSON 数组统一展开为字符串列表。"""
+    if not raw_value:
+        return []
+    try:
+        parsed = json.loads(raw_value)
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, str) and item.strip()]
+    except (json.JSONDecodeError, TypeError):
+        pass
+    if isinstance(raw_value, str) and raw_value.strip():
+        return [raw_value]
+    return []
+
+
+def _build_direction_label_index(
+    categories: dict[str, list[str]],
+) -> dict[str, list[tuple[str, str]]]:
+    """构建需求方向标签反向索引，用于把产品映射回原展示桶位。"""
+    label_index: dict[str, list[tuple[str, str]]] = {}
+    for category, directions in categories.items():
+        for direction in directions:
+            label_index.setdefault(direction, []).append((category, direction))
+    return label_index
+
+
+def _map_product_display_to_requirement_bucket(
+    product_display: str,
+    direction_label_index: dict[str, list[tuple[str, str]]],
+) -> Optional[tuple[str, str]]:
+    """将产品显示值映射回原有需求方向展示桶位。"""
+    parts = [part.strip() for part in (product_display or "").split(" - ") if part.strip()]
+    if not parts:
+        return None
+
+    leaf_label = parts[-1]
+    direct_matches = direction_label_index.get(leaf_label, [])
+    if len(direct_matches) == 1:
+        return direct_matches[0]
+
+    if parts[0] == "算力" and len(parts) >= 2:
+        vendor_bucket = f"{parts[1]}算力"
+        vendor_matches = direction_label_index.get(vendor_bucket, [])
+        if len(vendor_matches) == 1:
+            return vendor_matches[0]
+
+    model_leaf_mapping = {
+        "Deepseek": "通用大模型",
+        "Qwen": "通用大模型",
+        "Kimi": "通用大模型",
+        "爱编程": "编程大模型",
+    }
+    mapped_label = model_leaf_mapping.get(leaf_label)
+    if mapped_label:
+        mapped_matches = direction_label_index.get(mapped_label, [])
+        if len(mapped_matches) == 1:
+            return mapped_matches[0]
+
+    return None
 
 
 def get_user_group_members(db: Session, team_leader_id: int) -> List[int]:
@@ -1465,168 +1573,62 @@ def get_requirement_direction_statistics(
     end_date: Optional[date] = None
 ) -> List[RequirementDirectionGroupStatistics]:
     """获取需求方向统计（基于当前激活角色）"""
-    # 确定要统计的成员ID列表
-    member_ids_to_filter = None
-    
-    if current_role.role == UserRole.MEMBER:
-        member_ids_to_filter = [current_user.id]
-    elif current_role.role == UserRole.TEAM_LEADER:
-        member_ids_to_filter = get_user_group_members(db, current_user.id)
-    elif current_role.role == UserRole.MANAGER and group_id:
-        member_ids_to_filter = get_group_member_ids(db, group_id)
-    
-    # 根据当前激活角色过滤任务
-    task_query = db.query(Task)
-    if current_role.role == UserRole.TASK_INITIATOR:
-        task_query = task_query.filter(Task.initiator_id == current_user.id)
-    elif current_role.role == UserRole.SALES_CONTACT:
-        user_sales_unit = current_role.sales_unit or current_user.sales_unit
-        if user_sales_unit:
-            task_query = task_query.filter(Task.sales_unit.like(f"%{user_sales_unit}%"))
-        else:
-            task_query = task_query.filter(Task.sales_contact_id == current_user.id)
-    elif current_role.role == UserRole.TEAM_LEADER:
-        # 组长：通过工单的team_leader_id过滤，确保只统计创建时属于自己组的工单
-        work_orders = db.query(WorkOrder).filter(
-            work_orders_visible_to_team_leader_filter(db, current_user.id)
-        ).all()
-        task_ids = [wo.task_id for wo in work_orders]
-        if task_ids:
-            task_query = task_query.filter(Task.id.in_(task_ids))
-        else:
-            return []
-    elif current_role.role == UserRole.MEMBER:
-        work_orders = db.query(WorkOrder).filter(WorkOrder.member_id == current_user.id).all()
-        task_ids = [wo.task_id for wo in work_orders]
-        if task_ids:
-            task_query = task_query.filter(Task.id.in_(task_ids))
-        else:
-            return []
-    elif current_role.role == UserRole.MANAGER and group_id:
-        # 总管按组统计：通过组的leader_id找到该组的组长，然后通过工单的team_leader_id过滤
-        group = db.query(Group).filter(Group.id == group_id).first()
-        if group and group.leader_id:
-            work_orders = db.query(WorkOrder).filter(
-                or_(
-                    WorkOrder.team_leader_id == group.leader_id,
-                    WorkOrder.dispatch_group_id == group_id,
-                )
-            ).all()
-            task_ids = [wo.task_id for wo in work_orders]
-            if task_ids:
-                task_query = task_query.filter(Task.id.in_(task_ids))
-            else:
-                return []
-        else:
-            return []
-    
-    # 添加时间范围过滤
-    if start_date:
-        task_query = task_query.filter(func.date(Task.created_at) >= start_date)
-    if end_date:
-        task_query = task_query.filter(func.date(Task.created_at) <= end_date)
-    
-    # 获取所有相关任务的线索
-    task_ids = [t.id for t in task_query.all()]
-    lead_query = db.query(Lead).filter(Lead.task_id.in_(task_ids))
-    lead_query = apply_lead_list_role_scope(lead_query, db, current_user, current_role)
-    if start_date:
-        lead_query = lead_query.filter(func.date(Lead.created_at) >= start_date)
-    if end_date:
-        lead_query = lead_query.filter(func.date(Lead.created_at) <= end_date)
-    leads = lead_query.all()
-    
-    # 从数据库获取需求方向分类配置
     from app.models.option_config import OptionConfig, OptionType
-    
-    # 获取所有启用的需求方向选项
-    # 注意：option_type 现在存储为字符串，需要使用枚举的值进行比较
+    from app.utils.product_utils import convert_product_value_to_label
+    from app.utils.requirement_direction_utils import convert_requirement_direction_value_to_label
+
+    visit_log_query = apply_visit_log_statistics_scope(
+        db, current_user, current_role, group_id
+    ).options(joinedload(VisitLog.leads))
+
+    if start_date:
+        visit_log_query = visit_log_query.filter(func.date(VisitLog.visit_date) >= start_date)
+    if end_date:
+        visit_log_query = visit_log_query.filter(func.date(VisitLog.visit_date) <= end_date)
+
+    visit_logs = visit_log_query.all()
+    if not visit_logs:
+        return []
+
     option_configs = db.query(OptionConfig).filter(
         and_(
             OptionConfig.option_type == OptionType.REQUIREMENT_DIRECTION.value,
-            OptionConfig.is_active == True
+            OptionConfig.is_active == True,
         )
     ).order_by(OptionConfig.sort_order, OptionConfig.id).all()
-    
-    # 构建分类字典：category -> [directions]
-    categories: dict[str, list[str]] = {}
-    
-    # 遍历选项配置，构建分类结构
-    for opt in option_configs:
-        if opt.level == 1:
-            # 一级分类
-            if opt.parent_id is None:
-                # 检查是否有子项
-                has_children = any(child.parent_id == opt.id for child in option_configs)
-                if opt.label not in categories:
-                    if has_children:
-                        # 有子项的分类
-                        categories[opt.label] = []
-                    else:
-                        # 单级选项（如"定制化AI应用服务"），作为分类名，也是选项名
-                        categories[opt.label] = [opt.label]
-        elif opt.level == 2:
-            # 二级分类，需要找到父级
-            if opt.parent_id:
-                parent = db.query(OptionConfig).filter(OptionConfig.id == opt.parent_id).first()
-                if parent:
-                    if parent.label not in categories:
-                        categories[parent.label] = []
-                    categories[parent.label].append(opt.label)
-    
-    # 将value转换为label的映射字典（用于统计时转换）
-    from app.utils.requirement_direction_utils import convert_requirement_direction_value_to_label
-    
-    # 统计每个需求方向的数量
-    # 注意：数据库中存储的格式可能是：
-    # 1. 单选：字符串 "算力 - 英伟达算力" 或 "moxing - duomotaidamloking"
-    # 2. 多选：JSON数组字符串 '["算力 - 国产算力", "模型 - 通用大模型"]'
-    # 需要先转换为label格式，然后提取需求方向部分
-    import json
-    direction_counts = {}
-    for lead in leads:
-        direction = lead.requirement_direction
-        if direction:
-            # 尝试解析为JSON数组（多选格式）
-            try:
-                parsed = json.loads(direction)
-                if isinstance(parsed, list) and len(parsed) > 0:
-                    # 多选格式：对每个方向分别统计
-                    for single_direction in parsed:
-                        if isinstance(single_direction, str):
-                            direction_display = convert_requirement_direction_value_to_label(db, single_direction)
-                            # 提取需求方向部分
-                            actual_direction = _extract_direction_from_display(direction_display)
-                            direction_counts[actual_direction] = direction_counts.get(actual_direction, 0) + 1
-                    continue
-            except (json.JSONDecodeError, TypeError):
-                # 不是JSON格式，按单选格式处理
-                pass
-            
-            # 单选格式处理
-            direction_display = convert_requirement_direction_value_to_label(db, direction)
-            actual_direction = _extract_direction_from_display(direction_display)
-            direction_counts[actual_direction] = direction_counts.get(actual_direction, 0) + 1
-    
-    # 按分类组织统计结果
+
+    categories = _build_statistics_categories(option_configs)
+    direction_label_index = _build_direction_label_index(categories)
+    direction_counts: dict[tuple[str, str], int] = {}
+
+    for visit_log in visit_logs:
+        # 保持原有显示方式：先按线索需求方向统计
+        for lead in getattr(visit_log, "leads", []) or []:
+            for raw_direction in _iter_value_strings(lead.requirement_direction):
+                direction_display = convert_requirement_direction_value_to_label(db, raw_direction)
+                category, direction = _extract_category_and_direction_from_display(direction_display)
+                if category and direction:
+                    key = (category, direction)
+                    direction_counts[key] = direction_counts.get(key, 0) + 1
+
+        # 在原有桶位上，按“线索对应产品”做额外 +1
+        for raw_product in _iter_value_strings(getattr(visit_log, "clue_related_products", None)):
+            product_display = convert_product_value_to_label(raw_product, db)
+            mapped_bucket = _map_product_display_to_requirement_bucket(
+                product_display, direction_label_index
+            )
+            if mapped_bucket:
+                direction_counts[mapped_bucket] = direction_counts.get(mapped_bucket, 0) + 1
+
     result = []
     for category, directions in categories.items():
         direction_stats = []
-        # 如果分类下没有方向列表，使用分类名本身
-        if not directions:
-            # 检查是否有单级分类
-            count = direction_counts.get(category, 0)
+        for direction in directions:
+            count = direction_counts.get((category, direction), 0)
             direction_stats.append(RequirementDirectionStatistics(
-                direction=category,
+                direction=direction,
                 count=count
             ))
-        else:
-            for direction in directions:
-                count = direction_counts.get(direction, 0)
-                direction_stats.append(RequirementDirectionStatistics(
-                    direction=direction,
-                    count=count
-                ))
         result.append(RequirementDirectionGroupStatistics(
             category=category,
             directions=direction_stats

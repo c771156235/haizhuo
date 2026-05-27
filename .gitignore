@@ -7,6 +7,4 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 frontend/dist.7z
-backend/.env
-backend/uploads/
 *.patch
