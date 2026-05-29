@@ -19,9 +19,12 @@ import {
   OpportunityConvertedAmountStatistics as OpportunityConvertedAmountStatisticsComponent,
   GroupSelector,
   MemberDetailToggle,
-  DateRangeSelector
+  DateRangeSelector,
+  PerformanceDimensionSelector,
+  PERFORMANCE_DIMENSION_LABELS,
+  PERFORMANCE_DIMENSION_TITLES,
 } from '../components/Statistics'
-import type { DateRangePreset } from '../components/Statistics'
+import type { DateRangePreset, PerformanceDimension } from '../components/Statistics'
 import './Statistics.css'
 
 const { Title } = Typography
@@ -35,6 +38,9 @@ const Statistics = () => {
   
   // 成员明细切换状态（仅组长）
   const [showMemberDetails, setShowMemberDetails] = useState<'group' | 'members'>('group')
+
+  // 绩效统计维度：客户来源 / 小组 / 专项任务
+  const [performanceDimension, setPerformanceDimension] = useState<PerformanceDimension>('customer_source')
   
   // 转订商机总金额统计的成员明细切换状态（仅组长）
   const [showConvertedAmountMemberDetails, setShowConvertedAmountMemberDetails] = useState<boolean>(false)
@@ -57,6 +63,13 @@ const Statistics = () => {
   const isManager = currentRole?.role === 'manager'
   const isTeamLeader = currentRole?.role === 'team_leader'
   const isMember = currentRole?.role === 'member'
+
+  // 小组维度仅总管可用；组长/成员若曾选中则回退
+  useEffect(() => {
+    if (!isManager && performanceDimension === 'group') {
+      setPerformanceDimension('customer_source')
+    }
+  }, [isManager, performanceDimension])
 
   // 获取统计数据（未使用，但保留以备将来使用）
   // const { data: statistics, isLoading } = useQuery(
@@ -111,10 +124,11 @@ const Statistics = () => {
 
   // 获取销售单位绩效统计
   const { data: salesUnitPerformanceStats, isLoading: salesUnitPerformanceLoading } = useQuery(
-    ['salesUnitPerformanceStatistics', selectedGroupId, showMemberDetails, dateRangeParams],
+    ['salesUnitPerformanceStatistics', selectedGroupId, showMemberDetails, performanceDimension, dateRangeParams],
     () => statisticsService.getSalesUnitPerformanceStatistics({
       group_id: selectedGroupId,
       include_member_details: showMemberDetails === 'members' && isTeamLeader,
+      dimension: performanceDimension,
       ...dateRangeParams
     }),
     {
@@ -291,6 +305,11 @@ const Statistics = () => {
               {/* 分组选择器、成员明细切换、时间选择器和导出按钮 */}
               <div style={{ marginBottom: 16, display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'space-between' }}>
                 <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <PerformanceDimensionSelector
+                    value={performanceDimension}
+                    onChange={setPerformanceDimension}
+                    showGroupDimension={isManager}
+                  />
                   {isManager && (
                     <GroupSelector
                       value={selectedGroupId}
@@ -322,6 +341,7 @@ const Statistics = () => {
                             await exportService.exportSalesUnitPerformanceStatisticsExcel({
                               group_id: selectedGroupId,
                               include_member_details: showMemberDetails === 'members' && isTeamLeader,
+                              dimension: performanceDimension,
                               ...dateRangeParams
                             })
                             message.success('导出成功')
@@ -339,6 +359,7 @@ const Statistics = () => {
                             await exportService.exportSalesUnitPerformanceStatisticsPdf({
                               group_id: selectedGroupId,
                               include_member_details: showMemberDetails === 'members' && isTeamLeader,
+                              dimension: performanceDimension,
                               ...dateRangeParams
                             })
                             message.success('导出成功')
@@ -360,6 +381,8 @@ const Statistics = () => {
                 data={salesUnitPerformanceStats?.statistics || []}
                 memberDetails={showMemberDetails === 'members' ? salesUnitPerformanceStats?.member_details : undefined}
                 loading={salesUnitPerformanceLoading}
+                title={PERFORMANCE_DIMENSION_TITLES[performanceDimension]}
+                dimensionLabel={PERFORMANCE_DIMENSION_LABELS[performanceDimension]}
               />
             </div>
           )

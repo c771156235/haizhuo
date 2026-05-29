@@ -19,13 +19,16 @@ interface SalesUnitPerformanceStatisticsProps {
   memberDetails?: MemberDetailStatistics[]
   loading?: boolean
   title?: string
+  /** 首列标题，随统计维度变化 */
+  dimensionLabel?: string
 }
 
 export const SalesUnitPerformanceStatistics = ({ 
   data, 
   memberDetails,
   loading = false,
-  title = '销售单位绩效统计'
+  title = '销售单位绩效统计',
+  dimensionLabel = '客户来源',
 }: SalesUnitPerformanceStatisticsProps) => {
   if (loading) {
     return (
@@ -42,7 +45,7 @@ export const SalesUnitPerformanceStatistics = ({
   // 表格列定义
   const columns: ColumnsType<SalesUnitPerformanceStatisticsType> = [
     {
-      title: '客户来源',
+      title: dimensionLabel,
       dataIndex: 'sales_unit',
       key: 'sales_unit',
       width: 150,

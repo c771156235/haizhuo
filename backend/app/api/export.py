@@ -64,7 +64,9 @@ from app.api.statistics import (
     get_sales_unit_statistics,
     get_sales_unit_performance_statistics,
     get_requirement_direction_statistics,
-    get_member_workloads
+    get_member_workloads,
+    PERFORMANCE_DIMENSIONS,
+    PERFORMANCE_DIMENSION_LABELS,
 )
 from app.schemas.statistics import (
     OpportunityConvertedAmountStatistics,
@@ -2442,22 +2444,39 @@ def export_sales_unit_performance_statistics_to_excel(
     group_id: Optional[int] = None,
     include_member_details: bool = False,
     start_date: Optional[date] = None,
-    end_date: Optional[date] = None
+    end_date: Optional[date] = None,
+    dimension: str = "customer_source",
 ) -> io.BytesIO:
     """导出销售单位绩效统计为Excel（基于当前激活角色）"""
     from app.schemas.statistics import MemberDetailStatistics
+
+    if dimension not in PERFORMANCE_DIMENSIONS:
+        dimension = "customer_source"
+    dim_label = PERFORMANCE_DIMENSION_LABELS.get(dimension, "客户来源")
+    sheet_titles = {
+        "customer_source": "销售单位绩效统计",
+        "group": "小组绩效统计",
+        "task": "专项任务绩效统计",
+    }
     
     # 获取统计数据
     statistics, member_details = get_sales_unit_performance_statistics(
-        db, current_user, current_role, group_id, include_member_details, start_date, end_date
+        db,
+        current_user,
+        current_role,
+        group_id,
+        include_member_details,
+        start_date,
+        end_date,
+        dimension,
     )
     
     # 创建Excel工作簿
     wb = Workbook()
     
-    # 第一个工作表：销售单位绩效统计
+    # 第一个工作表：绩效统计
     ws = wb.active
-    ws.title = "销售单位绩效统计"
+    ws.title = sheet_titles.get(dimension, "绩效统计")
     
     # 设置列宽
     ws.column_dimensions['A'].width = 20
@@ -2480,7 +2499,7 @@ def export_sales_unit_performance_statistics_to_excel(
     data_alignment = Alignment(horizontal="center", vertical="center")
     
     # 写入标题
-    headers = ["销售单位", "已预约", "已拜访", "有效预约率（%）", "有拜访对象权限", 
+    headers = [dim_label, "已预约", "已拜访", "有效预约率（%）", "有拜访对象权限", 
                "有效拜访率（%）", "线索数", "商机数", "线索挖掘率（%）", "线索转化率（%）"]
     for idx, header in enumerate(headers, start=1):
         col = chr(64 + idx)  # A, B, C, ...
@@ -2604,15 +2623,32 @@ def export_sales_unit_performance_statistics_to_pdf(
     group_id: Optional[int] = None,
     include_member_details: bool = False,
     start_date: Optional[date] = None,
-    end_date: Optional[date] = None
+    end_date: Optional[date] = None,
+    dimension: str = "customer_source",
 ) -> io.BytesIO:
     """导出销售单位绩效统计为PDF（基于当前激活角色）"""
+    if dimension not in PERFORMANCE_DIMENSIONS:
+        dimension = "customer_source"
+    dim_label = PERFORMANCE_DIMENSION_LABELS.get(dimension, "客户来源")
+    report_titles = {
+        "customer_source": "销售单位绩效统计",
+        "group": "小组绩效统计",
+        "task": "专项任务绩效统计",
+    }
+
     # 注册中文字体
     chinese_font = register_chinese_font()
     
     # 获取统计数据
     statistics, member_details = get_sales_unit_performance_statistics(
-        db, current_user, current_role, group_id, include_member_details, start_date, end_date
+        db,
+        current_user,
+        current_role,
+        group_id,
+        include_member_details,
+        start_date,
+        end_date,
+        dimension,
     )
     
     # 创建PDF
@@ -2636,7 +2672,7 @@ def export_sales_unit_performance_statistics_to_pdf(
         fontSize=9,
     )
     
-    elements.append(Paragraph("销售单位绩效统计", title_style))
+    elements.append(Paragraph(report_titles.get(dimension, "绩效统计"), title_style))
     elements.append(Spacer(1, 0.2 * inch))
     
     # 添加时间范围信息
@@ -2648,7 +2684,7 @@ def export_sales_unit_performance_statistics_to_pdf(
     elements.append(Spacer(1, 0.2 * inch))
     
     # 准备表格数据（简化列，因为列太多）
-    data = [["销售单位", "已预约", "已拜访", "有效预约率（%）", "有决策权", 
+    data = [[dim_label, "已预约", "已拜访", "有效预约率（%）", "有决策权", 
              "有效拜访率（%）", "线索数", "商机数", "线索挖掘率（%）", "线索转化率（%）"]]
     
     for stat in statistics:
@@ -2749,6 +2785,7 @@ def export_sales_unit_performance_statistics_to_pdf(
 def export_sales_unit_performance_statistics_excel(
     group_id: Optional[int] = Query(None, description="分组ID（仅总管可用）"),
     include_member_details: bool = Query(False, description="是否包含成员明细（仅组长可用）"),
+    dimension: str = Query("customer_source", description="统计维度：customer_source/group/task"),
     start_date: Optional[str] = Query(None, description="开始日期（YYYY-MM-DD）"),
     end_date: Optional[str] = Query(None, description="结束日期（YYYY-MM-DD）"),
     user_role: tuple = Depends(get_current_role),
@@ -2756,6 +2793,15 @@ def export_sales_unit_performance_statistics_excel(
 ):
     """导出销售单位绩效统计为Excel（基于当前激活角色）"""
     current_user, current_role = user_role
+
+    if dimension not in PERFORMANCE_DIMENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"dimension 必须是 {', '.join(PERFORMANCE_DIMENSIONS)} 之一",
+        )
+
+    if dimension == "group" and current_role.role != UserRole.MANAGER:
+        raise HTTPException(status_code=403, detail="只有总管可以导出小组维度绩效统计")
     
     # 权限验证
     if group_id and current_role.role != UserRole.MANAGER:
@@ -2779,9 +2825,17 @@ def export_sales_unit_performance_statistics_excel(
             raise HTTPException(status_code=400, detail="结束日期格式错误，应为YYYY-MM-DD")
     
     output = export_sales_unit_performance_statistics_to_excel(
-        db, current_user, current_role, group_id, include_member_details, start_date_obj, end_date_obj
+        db,
+        current_user,
+        current_role,
+        group_id,
+        include_member_details,
+        start_date_obj,
+        end_date_obj,
+        dimension,
     )
-    filename = f"销售单位绩效统计_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    name_prefix = {"customer_source": "销售单位绩效统计", "group": "小组绩效统计", "task": "专项任务绩效统计"}
+    filename = f"{name_prefix.get(dimension, '绩效统计')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     filename_encoded = quote(filename, safe='')
     
     return StreamingResponse(
@@ -2797,6 +2851,7 @@ def export_sales_unit_performance_statistics_excel(
 def export_sales_unit_performance_statistics_pdf(
     group_id: Optional[int] = Query(None, description="分组ID（仅总管可用）"),
     include_member_details: bool = Query(False, description="是否包含成员明细（仅组长可用）"),
+    dimension: str = Query("customer_source", description="统计维度：customer_source/group/task"),
     start_date: Optional[str] = Query(None, description="开始日期（YYYY-MM-DD）"),
     end_date: Optional[str] = Query(None, description="结束日期（YYYY-MM-DD）"),
     user_role: tuple = Depends(get_current_role),
@@ -2804,6 +2859,15 @@ def export_sales_unit_performance_statistics_pdf(
 ):
     """导出销售单位绩效统计为PDF（基于当前激活角色）"""
     current_user, current_role = user_role
+
+    if dimension not in PERFORMANCE_DIMENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"dimension 必须是 {', '.join(PERFORMANCE_DIMENSIONS)} 之一",
+        )
+
+    if dimension == "group" and current_role.role != UserRole.MANAGER:
+        raise HTTPException(status_code=403, detail="只有总管可以导出小组维度绩效统计")
     
     # 权限验证
     if group_id and current_role.role != UserRole.MANAGER:
@@ -2827,9 +2891,17 @@ def export_sales_unit_performance_statistics_pdf(
             raise HTTPException(status_code=400, detail="结束日期格式错误，应为YYYY-MM-DD")
     
     output = export_sales_unit_performance_statistics_to_pdf(
-        db, current_user, current_role, group_id, include_member_details, start_date_obj, end_date_obj
+        db,
+        current_user,
+        current_role,
+        group_id,
+        include_member_details,
+        start_date_obj,
+        end_date_obj,
+        dimension,
     )
-    filename = f"销售单位绩效统计_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    name_prefix = {"customer_source": "销售单位绩效统计", "group": "小组绩效统计", "task": "专项任务绩效统计"}
+    filename = f"{name_prefix.get(dimension, '绩效统计')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
     filename_encoded = quote(filename, safe='')
     
     return StreamingResponse(

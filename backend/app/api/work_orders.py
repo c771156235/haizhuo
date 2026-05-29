@@ -1,7 +1,7 @@
 """
 工单管理 API
 """
-from typing import List, Optional
+from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session, joinedload
 from app.database import get_db
@@ -64,25 +64,109 @@ def get_fde_group_name_for_work_order(db: Session, work_order: WorkOrder) -> Opt
 
 
 def get_fde_group_name_for_team_leader(db: Session, team_leader_id: int) -> Optional[str]:
-    """根据工单组长用户 ID 解析其作为组长所属的 FDE 组名（与 /groups/me/my-group 组长分支逻辑一致）。"""
-    from sqlalchemy import or_
+    """根据用户 ID 解析其作为组长所属的 FDE 组名（与分组管理「组长」列表一致）。"""
     from app.models.group import Group, group_leaders
 
-    group = (
-        db.query(Group)
-        .join(group_leaders, Group.id == group_leaders.c.group_id, isouter=True)
-        .filter(
-            or_(
-                Group.leader_id == team_leader_id,
-                group_leaders.c.user_id == team_leader_id,
-            )
-        )
-        .distinct()
+    row = (
+        db.query(Group.name)
+        .join(group_leaders, Group.id == group_leaders.c.group_id)
+        .filter(group_leaders.c.user_id == team_leader_id)
         .first()
     )
-    if group:
-        return group.name
+    if row:
+        return row[0]
+
+    row = (
+        db.query(Group.name)
+        .filter(Group.leader_id == team_leader_id)
+        .first()
+    )
+    if row:
+        return row[0]
     return None
+
+
+def build_member_id_to_group_name_map(
+    db: Session, member_ids: List[int]
+) -> Dict[int, str]:
+    """批量解析用户当前所属 FDE 组名（与 /groups/me/my-group 优先级一致）。"""
+    from app.models.group import Group, group_members, group_leaders
+
+    if not member_ids:
+        return {}
+
+    unique_ids = list({mid for mid in member_ids if mid})
+    if not unique_ids:
+        return {}
+
+    mapping: Dict[int, str] = {}
+
+    for leader_id, name in (
+        db.query(Group.leader_id, Group.name)
+        .filter(Group.leader_id.in_(unique_ids))
+        .all()
+    ):
+        if leader_id and leader_id not in mapping:
+            mapping[leader_id] = name
+
+    for user_id, name in (
+        db.query(group_leaders.c.user_id, Group.name)
+        .join(Group, Group.id == group_leaders.c.group_id)
+        .filter(group_leaders.c.user_id.in_(unique_ids))
+        .all()
+    ):
+        if user_id not in mapping:
+            mapping[user_id] = name
+
+    for user_id, name in (
+        db.query(group_members.c.user_id, Group.name)
+        .join(Group, Group.id == group_members.c.group_id)
+        .filter(group_members.c.user_id.in_(unique_ids))
+        .order_by(group_members.c.group_id)
+        .all()
+    ):
+        if user_id not in mapping:
+            mapping[user_id] = name
+
+    return mapping
+
+
+def get_fde_group_name_for_member(db: Session, member_id: int) -> Optional[str]:
+    """执行成员当前所属 FDE 组名。"""
+    if not member_id:
+        return None
+    return build_member_id_to_group_name_map(db, [member_id]).get(member_id)
+
+
+def build_team_leader_id_to_group_name_map(
+    db: Session, team_leader_ids: List[int]
+) -> Dict[int, str]:
+    """批量解析组长用户 ID -> FDE 组名（group_leaders 关联表 + 主组长 leader_id）。"""
+    from app.models.group import Group, group_leaders
+
+    needed = {tid for tid in team_leader_ids if tid}
+    if not needed:
+        return {}
+
+    mapping: Dict[int, str] = {}
+    for user_id, name in (
+        db.query(group_leaders.c.user_id, Group.name)
+        .join(Group, Group.id == group_leaders.c.group_id)
+        .filter(group_leaders.c.user_id.in_(needed))
+        .all()
+    ):
+        mapping[user_id] = name
+
+    missing = needed - set(mapping.keys())
+    if missing:
+        for leader_id, name in (
+            db.query(Group.leader_id, Group.name)
+            .filter(Group.leader_id.in_(missing))
+            .all()
+        ):
+            if leader_id:
+                mapping[leader_id] = name
+    return mapping
 
 
 def enrich_work_order_response(work_order: WorkOrder, db: Session) -> WorkOrderResponse:

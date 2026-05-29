@@ -412,12 +412,14 @@ export const exportService = {
   exportSalesUnitPerformanceStatisticsExcel: async (params?: {
     group_id?: number
     include_member_details?: boolean
+    dimension?: string
     start_date?: string
     end_date?: string
   }): Promise<void> => {
     const queryParams = new URLSearchParams()
     if (params?.group_id) queryParams.append('group_id', params.group_id.toString())
     if (params?.include_member_details) queryParams.append('include_member_details', 'true')
+    if (params?.dimension) queryParams.append('dimension', params.dimension)
     if (params?.start_date) queryParams.append('start_date', params.start_date)
     if (params?.end_date) queryParams.append('end_date', params.end_date)
     
@@ -444,12 +446,14 @@ export const exportService = {
   exportSalesUnitPerformanceStatisticsPdf: async (params?: {
     group_id?: number
     include_member_details?: boolean
+    dimension?: string
     start_date?: string
     end_date?: string
   }): Promise<void> => {
     const queryParams = new URLSearchParams()
     if (params?.group_id) queryParams.append('group_id', params.group_id.toString())
     if (params?.include_member_details) queryParams.append('include_member_details', 'true')
+    if (params?.dimension) queryParams.append('dimension', params.dimension)
     if (params?.start_date) queryParams.append('start_date', params.start_date)
     if (params?.end_date) queryParams.append('end_date', params.end_date)
     

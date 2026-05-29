@@ -95,6 +95,7 @@ class SalesUnitStatistics(BaseModel):
 class SalesUnitPerformanceStatistics(BaseModel):
     """销售单位绩效统计（按客户来源分组）"""
     sales_unit: str  # 客户来源（销售单位）
+    group_name: Optional[str] = None  # 小组名称（仅 group 维度时有值）
     appointments_made: int = 0  # 已预约（工单数量）
     visits_completed: int = 0  # 已拜访（拜访日志数量）
     effective_appointment_rate: float = 0.0  # 有效预约率 = 已拜访 / 已预约
@@ -135,7 +136,8 @@ class MemberDetailStatistics(BaseModel):
 
 class SalesUnitPerformanceResponse(BaseModel):
     """销售单位绩效统计响应"""
-    statistics: List[SalesUnitPerformanceStatistics] = []  # 按销售单位分组的统计
+    statistics: List[SalesUnitPerformanceStatistics] = []  # 按维度分组的统计（行标签在 sales_unit 字段）
+    dimension: str = "customer_source"  # customer_source | group | task
     requirement_directions: List[RequirementDirectionGroupStatistics] = []  # 需求方向统计（按分类分组）
     member_details: Optional[List[MemberDetailStatistics]] = None  # 成员明细统计（仅组长可用）
 

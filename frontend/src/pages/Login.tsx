@@ -74,6 +74,21 @@ const Login = () => {
     }
   }, [])
 
+  // 验证码错误提示：展示 5 秒后自动消失
+  useEffect(() => {
+    if (error?.field !== 'captcha_answer') return
+
+    const t = window.setTimeout(() => {
+      setError(null)
+      // 同步清理表单字段错误，避免红框/文案残留
+      form.setFields([{ name: 'captcha_answer', errors: [] }])
+    }, 5000)
+
+    return () => {
+      window.clearTimeout(t)
+    }
+  }, [error, form])
+
   // 提取并分类错误信息
   const extractError = (error: any): LoginError => {
     if (!error) {
@@ -212,12 +227,15 @@ const Login = () => {
     
     // 验证验证码是否已输入
     if (!values.captcha_answer || values.captcha_answer.trim() === '') {
+      setError({ type: 'captcha', message: '请输入验证码', field: 'captcha_answer' })
       form.setFields([
         { 
           name: 'captcha_answer', 
           errors: ['请输入验证码'],
         },
       ])
+      // 未填写验证码时也刷新一次，避免用户继续输入旧图（token 可能已失效）
+      void fetchCaptcha()
       return
     }
     // 验证码必须是数字（算术验证码答案为整数）
@@ -648,6 +666,16 @@ const Login = () => {
           form={form}
           name="login"
           onFinish={onFinish}
+          onFinishFailed={(info) => {
+            const captchaMissing = (info?.errorFields || []).some((f) => {
+              const name = Array.isArray(f.name) ? f.name[0] : f.name
+              return name === 'captcha_answer'
+            })
+            if (captchaMissing) {
+              setError({ type: 'captcha', message: '请输入验证码', field: 'captcha_answer' })
+              void fetchCaptcha()
+            }
+          }}
           autoComplete="off"
           size="large"
           layout="vertical"
@@ -751,46 +779,54 @@ const Login = () => {
 
           {/* 验证码输入框 */}
           <Form.Item
-            name="captcha_answer"
-            rules={[{ required: true, message: '请输入验证码' }]}
             style={{ marginBottom: '20px' }}
-            validateStatus={error?.field === 'captcha_answer' ? 'error' : ''}
-            help={error?.field === 'captcha_answer' ? error.message : ''}
           >
             <div>
               <div style={{ marginBottom: '8px', fontSize: '14px', color: '#595959', fontWeight: 500 }}>
                 验证码
               </div>
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
                 {/* 验证码输入框 */}
-                <Input
-                  placeholder="请输入结果"
-                  onChange={handleInputChange}
-                  maxLength={2}
-                  style={{
-                    flex: 1,
-                    height: '44px',
-                    borderRadius: '8px',
-                    fontSize: '15px',
-                    border: error?.field === 'captcha_answer' 
-                      ? '1.5px solid #ff4d4f' 
-                      : '1.5px solid #d9d9d9',
-                    transition: 'all 0.3s',
-                  }}
-                  onFocus={(e) => {
-                    const borderColor = error?.field === 'captcha_answer' ? '#ff4d4f' : '#1890ff'
-                    e.target.style.borderColor = borderColor
-                    e.target.style.boxShadow = error?.field === 'captcha_answer'
-                      ? '0 0 0 2px rgba(255, 77, 79, 0.1)'
-                      : '0 0 0 2px rgba(24, 144, 255, 0.1)'
-                  }}
-                  onBlur={(e) => {
-                    e.target.style.borderColor = error?.field === 'captcha_answer' 
-                      ? '#ff4d4f' 
-                      : '#d9d9d9'
-                    e.target.style.boxShadow = 'none'
-                  }}
-                />
+                <Form.Item
+                  name="captcha_answer"
+                  rules={[{ required: true, message: '请输入验证码' }]}
+                  style={{ flex: 1, marginBottom: 0 }}
+                  validateStatus={error?.field === 'captcha_answer' ? 'error' : undefined}
+                  // 始终渲染同高度的 explain 区域，避免布局跳动；无错误时隐藏占位
+                  help={
+                    error?.field === 'captcha_answer'
+                      ? error.message
+                      : <span style={{ visibility: 'hidden' }}>占位</span>
+                  }
+                >
+                  <Input
+                    placeholder="请输入结果"
+                    onChange={handleInputChange}
+                    maxLength={2}
+                    style={{
+                      height: '44px',
+                      borderRadius: '8px',
+                      fontSize: '15px',
+                      border: error?.field === 'captcha_answer'
+                        ? '1.5px solid #ff4d4f'
+                        : '1.5px solid #d9d9d9',
+                      transition: 'all 0.3s',
+                    }}
+                    onFocus={(e) => {
+                      const borderColor = error?.field === 'captcha_answer' ? '#ff4d4f' : '#1890ff'
+                      e.target.style.borderColor = borderColor
+                      e.target.style.boxShadow = error?.field === 'captcha_answer'
+                        ? '0 0 0 2px rgba(255, 77, 79, 0.1)'
+                        : '0 0 0 2px rgba(24, 144, 255, 0.1)'
+                    }}
+                    onBlur={(e) => {
+                      e.target.style.borderColor = error?.field === 'captcha_answer'
+                        ? '#ff4d4f'
+                        : '#d9d9d9'
+                      e.target.style.boxShadow = 'none'
+                    }}
+                  />
+                </Form.Item>
                 
                 {/* 验证码图片 */}
                 <div

@@ -1,7 +1,8 @@
 """
 统计数据 API
 """
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
+from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, Query
 import json
 from sqlalchemy.orm import Session, joinedload
@@ -38,6 +39,36 @@ from app.utils.work_order_pool import work_orders_visible_to_team_leader_filter
 router = APIRouter(prefix="/statistics", tags=["统计数据"])
 
 
+def _get_group_team_leader_ids(db: Session, group: Group) -> List[int]:
+    """获取 FDE 组内全部组长用户 ID（主组长 leader_id + 联席组长 group_leaders）。"""
+    leader_ids: set = set()
+    if group.leader_id:
+        leader_ids.add(group.leader_id)
+    for row in db.query(group_leaders.c.user_id).filter(
+        group_leaders.c.group_id == group.id
+    ).all():
+        leader_ids.add(row[0])
+    return list(leader_ids)
+
+
+def _manager_group_work_order_filter(db: Session, group_id: int):
+    """总管按 FDE 组筛选工单：组长名下工单 + 该组待认领派单。"""
+    group = db.query(Group).filter(Group.id == group_id).first()
+    if not group:
+        return WorkOrder.id == -1
+    leader_ids = _get_group_team_leader_ids(db, group)
+    clauses = []
+    if leader_ids:
+        clauses.append(WorkOrder.team_leader_id.in_(leader_ids))
+    clauses.append(
+        and_(
+            WorkOrder.dispatch_group_id == group_id,
+            WorkOrder.status == WorkOrderStatus.PENDING_GROUP_CLAIM.value,
+        )
+    )
+    return or_(*clauses)
+
+
 def apply_work_order_statistics_scope(
     db: Session,
     current_user: User,
@@ -47,18 +78,7 @@ def apply_work_order_statistics_scope(
     """工单统计基数：与 get_work_orders 一致；总管且带 group_id 时按该组组长创建组收敛。"""
     q = db.query(WorkOrder)
     if current_role.role == UserRole.MANAGER and group_id:
-        group = db.query(Group).filter(Group.id == group_id).first()
-        if group and group.leader_id:
-            return q.filter(
-                or_(
-                    WorkOrder.team_leader_id == group.leader_id,
-                    and_(
-                        WorkOrder.dispatch_group_id == group_id,
-                        WorkOrder.status == WorkOrderStatus.PENDING_GROUP_CLAIM.value,
-                    ),
-                )
-            )
-        return q.filter(WorkOrder.id == -1)
+        return q.filter(_manager_group_work_order_filter(db, group_id))
     if current_role.role == UserRole.MANAGER:
         return q
     return apply_work_order_role_scope(q, db, current_user, current_role)
@@ -74,13 +94,10 @@ def apply_visit_log_statistics_scope(
     q = db.query(VisitLog)
     if current_role.role == UserRole.MANAGER and group_id:
         group = db.query(Group).filter(Group.id == group_id).first()
-        if not group or not group.leader_id:
+        if not group:
             return q.filter(VisitLog.id == -1)
         work_orders = db.query(WorkOrder).filter(
-            or_(
-                WorkOrder.team_leader_id == group.leader_id,
-                WorkOrder.dispatch_group_id == group_id,
-            )
+            _manager_group_work_order_filter(db, group_id)
         ).all()
         work_order_ids = [wo.id for wo in work_orders]
         if work_order_ids:
@@ -101,8 +118,11 @@ def apply_opportunity_statistics_scope(
     q = db.query(Opportunity)
     if current_role.role == UserRole.MANAGER and group_id:
         group = db.query(Group).filter(Group.id == group_id).first()
-        if group and group.leader_id:
-            return q.filter(Opportunity.team_leader_id == group.leader_id)
+        if not group:
+            return q.filter(Opportunity.id == -1)
+        leader_ids = _get_group_team_leader_ids(db, group)
+        if leader_ids:
+            return q.filter(Opportunity.team_leader_id.in_(leader_ids))
         return q.filter(Opportunity.id == -1)
     if current_role.role == UserRole.MANAGER:
         return q
@@ -873,20 +893,12 @@ def get_time_range_statistics(
         else:
             return []
     elif current_role.role == UserRole.MANAGER and group_id:
-        # 总管按组统计：通过组的leader_id找到该组的组长，然后通过工单的team_leader_id过滤
-        group = db.query(Group).filter(Group.id == group_id).first()
-        if group and group.leader_id:
-            work_orders = db.query(WorkOrder).filter(
-                or_(
-                    WorkOrder.team_leader_id == group.leader_id,
-                    WorkOrder.dispatch_group_id == group_id,
-                )
-            ).all()
-            task_ids = [wo.task_id for wo in work_orders]
-            if task_ids:
-                task_query = task_query.filter(Task.id.in_(task_ids))
-            else:
-                return []
+        wo_query = apply_work_order_statistics_scope(
+            db, current_user, current_role, group_id
+        ).filter(WorkOrder.status != WorkOrderStatus.CANCELLED.value)
+        task_ids = list({wo.task_id for wo in wo_query.all()})
+        if task_ids:
+            task_query = task_query.filter(Task.id.in_(task_ids))
         else:
             return []
     
@@ -1014,20 +1026,12 @@ def get_sales_unit_statistics(
         else:
             return []
     elif current_role.role == UserRole.MANAGER and group_id:
-        # 总管按组统计：通过组的leader_id找到该组的组长，然后通过工单的team_leader_id过滤
-        group = db.query(Group).filter(Group.id == group_id).first()
-        if group and group.leader_id:
-            work_orders = db.query(WorkOrder).filter(
-                or_(
-                    WorkOrder.team_leader_id == group.leader_id,
-                    WorkOrder.dispatch_group_id == group_id,
-                )
-            ).all()
-            task_ids = [wo.task_id for wo in work_orders]
-            if task_ids:
-                task_query = task_query.filter(Task.id.in_(task_ids))
-            else:
-                return []
+        wo_query = apply_work_order_statistics_scope(
+            db, current_user, current_role, group_id
+        ).filter(WorkOrder.status != WorkOrderStatus.CANCELLED.value)
+        task_ids = list({wo.task_id for wo in wo_query.all()})
+        if task_ids:
+            task_query = task_query.filter(Task.id.in_(task_ids))
         else:
             return []
     
@@ -1240,52 +1244,54 @@ def get_sales_unit_statistics_api(
     return get_sales_unit_statistics(db, current_user, current_role, group_id, start_date_obj, end_date_obj)
 
 
-def get_sales_unit_performance_statistics(
-    db: Session, 
-    current_user: User, 
-    current_role,
-    group_id: Optional[int] = None,
-    include_member_details: bool = False,
+PERFORMANCE_DIMENSIONS = ("customer_source", "group", "task")
+PERFORMANCE_DIMENSION_LABELS = {
+    "customer_source": "客户来源",
+    "group": "小组",
+    "task": "专项任务",
+}
+
+
+def _assert_performance_group_dimension_allowed(current_role) -> None:
+    if current_role.role != UserRole.MANAGER:
+        raise HTTPException(status_code=403, detail="只有总管可以查看小组维度绩效统计")
+
+
+def _apply_performance_work_order_query_filters(
+    work_order_query,
     start_date: Optional[date] = None,
-    end_date: Optional[date] = None
-) -> Tuple[List[SalesUnitPerformanceStatistics], Optional[List]]:
-    """获取销售单位绩效统计（基于当前激活角色）
-    
-    Returns:
-        (统计列表, 成员明细列表)
-    """
-    from sqlalchemy.orm import joinedload
-    
-    # 确定要统计的成员ID列表
-    member_ids_to_filter = None
-    
-    if current_role.role == UserRole.MEMBER:
-        # 成员：只能看到自己的数据
-        member_ids_to_filter = [current_user.id]
-    elif current_role.role == UserRole.TEAM_LEADER:
-        # 组长：获取组内所有成员
-        member_ids_to_filter = get_user_group_members(db, current_user.id)
-    elif current_role.role == UserRole.MANAGER:
-        # 总管：如果指定了group_id，只统计该分组；否则统计所有
-        if group_id:
-            member_ids_to_filter = get_group_member_ids(db, group_id)
-            if not member_ids_to_filter:
-                # 如果分组没有成员，返回空结果
-                return [], None
-    
-    # 根据当前激活角色过滤任务
+    end_date: Optional[date] = None,
+):
+    """绩效统计工单基数：排除已取消，并按工单创建时间筛选。"""
+    work_order_query = work_order_query.filter(
+        WorkOrder.status != WorkOrderStatus.CANCELLED.value
+    )
+    if start_date:
+        work_order_query = work_order_query.filter(func.date(WorkOrder.created_at) >= start_date)
+    if end_date:
+        work_order_query = work_order_query.filter(func.date(WorkOrder.created_at) <= end_date)
+    return work_order_query
+
+
+def _get_performance_task_ids_for_scope(
+    db: Session,
+    current_user: User,
+    current_role,
+    group_id: Optional[int],
+    start_date: Optional[date],
+    end_date: Optional[date],
+) -> List[int]:
+    """按角色与时间范围得到绩效统计可用的任务 ID 列表。"""
     task_query = db.query(Task)
     if current_role.role == UserRole.TASK_INITIATOR:
         task_query = task_query.filter(Task.initiator_id == current_user.id)
     elif current_role.role == UserRole.SALES_CONTACT:
-        # 销售单位接口人可以查看销售单位匹配的任务
         user_sales_unit = current_role.sales_unit or current_user.sales_unit
         if user_sales_unit:
             task_query = task_query.filter(Task.sales_unit.like(f"%{user_sales_unit}%"))
         else:
             task_query = task_query.filter(Task.sales_contact_id == current_user.id)
     elif current_role.role == UserRole.TEAM_LEADER:
-        # 组长：通过工单的team_leader_id过滤，确保只统计创建时属于自己组的工单
         work_orders = db.query(WorkOrder).filter(
             work_orders_visible_to_team_leader_filter(db, current_user.id)
         ).all()
@@ -1293,188 +1299,186 @@ def get_sales_unit_performance_statistics(
         if task_ids:
             task_query = task_query.filter(Task.id.in_(task_ids))
         else:
-            return [], None
+            return []
     elif current_role.role == UserRole.MEMBER:
-        # 成员：只能看到自己的工单
         work_orders = db.query(WorkOrder).filter(WorkOrder.member_id == current_user.id).all()
         task_ids = [wo.task_id for wo in work_orders]
         if task_ids:
             task_query = task_query.filter(Task.id.in_(task_ids))
         else:
-            return [], None
+            return []
     elif current_role.role == UserRole.MANAGER and group_id:
-        # 总管按分组筛选：通过组的leader_id找到该组的组长，然后通过工单的team_leader_id过滤
-        group = db.query(Group).filter(Group.id == group_id).first()
-        if group and group.leader_id:
-            work_orders = db.query(WorkOrder).filter(
-                or_(
-                    WorkOrder.team_leader_id == group.leader_id,
-                    WorkOrder.dispatch_group_id == group_id,
-                )
-            ).all()
-            task_ids = [wo.task_id for wo in work_orders]
-            if task_ids:
-                task_query = task_query.filter(Task.id.in_(task_ids))
-            else:
-                return [], None
+        wo_query = apply_work_order_statistics_scope(
+            db, current_user, current_role, group_id
+        ).filter(WorkOrder.status != WorkOrderStatus.CANCELLED.value)
+        task_ids = list({wo.task_id for wo in wo_query.all()})
+        if task_ids:
+            task_query = task_query.filter(Task.id.in_(task_ids))
         else:
-            return [], None
-    
-    # 添加时间范围过滤
+            return []
+
     if start_date:
         task_query = task_query.filter(func.date(Task.created_at) >= start_date)
     if end_date:
         task_query = task_query.filter(func.date(Task.created_at) <= end_date)
-    
-    # 先获取相关任务ID，用于限制需求和后续统计的范围
-    related_tasks = task_query.all()
-    task_ids_for_scope = [t.id for t in related_tasks]
-    if not task_ids_for_scope:
-        return [], None
-    
-    # =========================
-    # 分组维度：客户来源 customer_source
-    # =========================
-    # 从 TaskDetailRequirement.customer_source 中提取所有非空的客户来源，作为统计维度
+
+    return [t.id for t in task_query.all()]
+
+
+def _get_customer_sources_for_performance(
+    db: Session,
+    task_ids_for_scope: List[int],
+) -> List[str]:
+    """从需求明细中提取非空客户来源列表。"""
     customer_source_query = db.query(TaskDetailRequirement.customer_source).filter(
         TaskDetailRequirement.task_id.in_(task_ids_for_scope),
         TaskDetailRequirement.customer_source.isnot(None),
-        TaskDetailRequirement.customer_source != ""
+        TaskDetailRequirement.customer_source != "",
     )
-    # 根据角色和组过滤需求对应的工单范围（与后续保持一致）
-    # 这里只做粗粒度过滤：后面每个客户来源仍会再按角色/时间精细过滤
     customer_sources_raw = [cs[0] for cs in customer_source_query.distinct().all() if cs[0]]
-    customer_source_set = set(cs.strip() for cs in customer_sources_raw if cs and cs.strip())
-    
-    # 如果没有任何带客户来源的需求，直接返回空结果
-    if not customer_source_set:
-        return [], None
-    
-    sales_unit_list = sorted(list(customer_source_set))
-    
-    statistics = []
-    for sales_unit in sales_unit_list:
-        # 这里的 sales_unit 实际上是“客户来源”字段的值
-        
-        # 1. 找到该客户来源的所有需求（限定在当前任务范围内）
-        requirement_query = db.query(TaskDetailRequirement.id, TaskDetailRequirement.task_id).filter(
+    customer_source_set = {cs.strip() for cs in customer_sources_raw if cs and cs.strip()}
+    return sorted(customer_source_set)
+
+
+def _get_work_orders_for_customer_source(
+    db: Session,
+    current_user: User,
+    current_role,
+    group_id: Optional[int],
+    task_ids_for_scope: List[int],
+    customer_source: str,
+    start_date: Optional[date],
+    end_date: Optional[date],
+) -> List[WorkOrder]:
+    """按需求客户来源归因获取工单（与客户来源维度口径一致）。"""
+    requirement_rows = (
+        db.query(TaskDetailRequirement.id, TaskDetailRequirement.task_id)
+        .filter(
             TaskDetailRequirement.task_id.in_(task_ids_for_scope),
-            TaskDetailRequirement.customer_source == sales_unit
+            TaskDetailRequirement.customer_source == customer_source,
         )
-        requirement_rows = requirement_query.all()
-        requirement_ids = [row[0] for row in requirement_rows]
-        task_ids = list({row[1] for row in requirement_rows})  # 该客户来源涉及到的任务ID
-        
-        if not requirement_ids and not task_ids:
-            # 该客户来源下没有任何有效数据，跳过
-            continue
-        
-        perf_wo_scope = apply_work_order_statistics_scope(
-            db, current_user, current_role, group_id
-        )
-        if requirement_ids:
-            work_order_query = perf_wo_scope.filter(
-                WorkOrder.detail_requirement_id.in_(requirement_ids)
-            )
-        else:
-            work_order_query = perf_wo_scope.filter(
-                WorkOrder.task_id.in_(task_ids or task_ids_for_scope),
-                WorkOrder.detail_requirement_id.is_(None),
-            )
+        .all()
+    )
+    requirement_ids = [row[0] for row in requirement_rows]
+    task_ids = list({row[1] for row in requirement_rows})
+    if not requirement_ids and not task_ids:
+        return []
 
-        # 时间范围过滤
-        if start_date:
-            work_order_query = work_order_query.filter(func.date(WorkOrder.created_at) >= start_date)
-        if end_date:
-            work_order_query = work_order_query.filter(func.date(WorkOrder.created_at) <= end_date)
-        
-        work_orders = work_order_query.all()
-        appointments_made = len(work_orders)
-        if appointments_made == 0:
-            continue
-        work_order_ids = [wo.id for wo in work_orders]
-        
-        # 2. 已拜访 = 拜访日志数量
-        visit_log_query = db.query(VisitLog).filter(VisitLog.work_order_id.in_(work_order_ids))
-        if start_date:
-            visit_log_query = visit_log_query.filter(func.date(VisitLog.visit_date) >= start_date)
-        if end_date:
-            visit_log_query = visit_log_query.filter(func.date(VisitLog.visit_date) <= end_date)
-        visit_logs = visit_log_query.all()
-        visits_completed = len(visit_logs)
-        
-        # 3. 有效预约率 = 已拜访 / 已预约
-        effective_appointment_rate = (visits_completed / appointments_made * 100) if appointments_made > 0 else 0.0
-        
-        # 4. 有决策/建议权 = 拜访日志中拜访对象有决策/建议权的拜访日志数量
-        visit_log_ids = [vl.id for vl in visit_logs]
-        has_decision_authority = sum(
-            1 for vl in visit_logs if visit_log_counts_as_has_authority(vl.has_decision_authority)
+    perf_wo_scope = apply_work_order_statistics_scope(db, current_user, current_role, group_id)
+    if requirement_ids:
+        work_order_query = perf_wo_scope.filter(
+            WorkOrder.detail_requirement_id.in_(requirement_ids)
         )
-        
-        # 5. 有效拜访率 = 有决策/建议权 / 已拜访
-        effective_visit_rate = (has_decision_authority / visits_completed * 100) if visits_completed > 0 else 0.0
-        
-        # 6. 线索数量：以拜访日志「是否有线索」为准（线索维护合并后不再依赖 leads 表是否有行）
-        lead_count = sum(
-            1 for vl in visit_logs if visit_log_counts_as_has_clue(vl.has_clue)
+    else:
+        work_order_query = perf_wo_scope.filter(
+            WorkOrder.task_id.in_(task_ids or task_ids_for_scope),
+            WorkOrder.detail_requirement_id.is_(None),
         )
+    work_order_query = _apply_performance_work_order_query_filters(
+        work_order_query, start_date, end_date
+    )
+    return work_order_query.all()
 
-        perf_opp_scope = apply_opportunity_statistics_scope(
-            db, current_user, current_role, group_id
-        )
-        if visit_log_ids:
-            lead_ids = [
-                row[0]
-                for row in db.query(Lead.id).filter(Lead.visit_log_id.in_(visit_log_ids)).all()
-            ]
-            if lead_ids:
-                opportunity_query = perf_opp_scope.filter(
-                    Opportunity.lead_id.in_(lead_ids)
-                )
-            else:
-                opportunity_query = perf_opp_scope.filter(Opportunity.id == -1)
+
+def _compute_performance_row_for_work_orders(
+    db: Session,
+    current_user: User,
+    current_role,
+    group_id: Optional[int],
+    label: str,
+    work_orders: List[WorkOrder],
+    start_date: Optional[date],
+    end_date: Optional[date],
+    group_name: Optional[str] = None,
+) -> Optional[SalesUnitPerformanceStatistics]:
+    """对一组工单计算单行绩效指标。"""
+    if not work_orders:
+        return None
+
+    work_order_ids = [wo.id for wo in work_orders]
+    appointments_made = len(work_orders)
+
+    visit_log_query = db.query(VisitLog).filter(VisitLog.work_order_id.in_(work_order_ids))
+    if start_date:
+        visit_log_query = visit_log_query.filter(func.date(VisitLog.visit_date) >= start_date)
+    if end_date:
+        visit_log_query = visit_log_query.filter(func.date(VisitLog.visit_date) <= end_date)
+    visit_logs = visit_log_query.all()
+    visits_completed = len(visit_logs)
+
+    effective_appointment_rate = (
+        (visits_completed / appointments_made * 100) if appointments_made > 0 else 0.0
+    )
+    has_decision_authority = sum(
+        1 for vl in visit_logs if visit_log_counts_as_has_authority(vl.has_decision_authority)
+    )
+    effective_visit_rate = (
+        (has_decision_authority / visits_completed * 100) if visits_completed > 0 else 0.0
+    )
+    lead_count = sum(1 for vl in visit_logs if visit_log_counts_as_has_clue(vl.has_clue))
+
+    visit_log_ids = [vl.id for vl in visit_logs]
+    perf_opp_scope = apply_opportunity_statistics_scope(db, current_user, current_role, group_id)
+    if visit_log_ids:
+        lead_ids = [
+            row[0] for row in db.query(Lead.id).filter(Lead.visit_log_id.in_(visit_log_ids)).all()
+        ]
+        if lead_ids:
+            opportunity_query = perf_opp_scope.filter(Opportunity.lead_id.in_(lead_ids))
         else:
             opportunity_query = perf_opp_scope.filter(Opportunity.id == -1)
-        if start_date:
-            opportunity_query = opportunity_query.filter(func.date(Opportunity.created_at) >= start_date)
-        if end_date:
-            opportunity_query = opportunity_query.filter(func.date(Opportunity.created_at) <= end_date)
-        opportunity_count = opportunity_query.count()
-        
-        # 8. 线索挖掘率 = 线索数量 / 有决策/建议权
-        lead_mining_rate = (lead_count / has_decision_authority * 100) if has_decision_authority > 0 else 0.0
-        
-        # 9. 线索转化率 = 商机数量 / 线索数量
-        lead_conversion_rate = (opportunity_count / lead_count * 100) if lead_count > 0 else 0.0
-        
-        statistics.append(SalesUnitPerformanceStatistics(
-            sales_unit=sales_unit,
-            appointments_made=appointments_made,
-            visits_completed=visits_completed,
-            effective_appointment_rate=round(effective_appointment_rate, 2),
-            has_decision_authority=has_decision_authority,
-            effective_visit_rate=round(effective_visit_rate, 2),
-            lead_count=lead_count,
-            opportunity_count=opportunity_count,
-            lead_mining_rate=round(lead_mining_rate, 2),
-            lead_conversion_rate=round(lead_conversion_rate, 2)
-        ))
-    
-    # 计算总计
-    if statistics:
-        total_appointments = sum(s.appointments_made for s in statistics)
-        total_visits = sum(s.visits_completed for s in statistics)
-        total_decision_authority = sum(s.has_decision_authority for s in statistics)
-        total_leads = sum(s.lead_count for s in statistics)
-        total_opportunities = sum(s.opportunity_count for s in statistics)
-        
-        total_effective_appointment_rate = (total_visits / total_appointments * 100) if total_appointments > 0 else 0.0
-        total_effective_visit_rate = (total_decision_authority / total_visits * 100) if total_visits > 0 else 0.0
-        total_lead_mining_rate = (total_leads / total_decision_authority * 100) if total_decision_authority > 0 else 0.0
-        total_lead_conversion_rate = (total_opportunities / total_leads * 100) if total_leads > 0 else 0.0
-        
-        statistics.append(SalesUnitPerformanceStatistics(
+    else:
+        opportunity_query = perf_opp_scope.filter(Opportunity.id == -1)
+    if start_date:
+        opportunity_query = opportunity_query.filter(func.date(Opportunity.created_at) >= start_date)
+    if end_date:
+        opportunity_query = opportunity_query.filter(func.date(Opportunity.created_at) <= end_date)
+    opportunity_count = opportunity_query.count()
+
+    lead_mining_rate = (lead_count / has_decision_authority * 100) if has_decision_authority > 0 else 0.0
+    lead_conversion_rate = (opportunity_count / lead_count * 100) if lead_count > 0 else 0.0
+
+    return SalesUnitPerformanceStatistics(
+        sales_unit=label,
+        group_name=group_name,
+        appointments_made=appointments_made,
+        visits_completed=visits_completed,
+        effective_appointment_rate=round(effective_appointment_rate, 2),
+        has_decision_authority=has_decision_authority,
+        effective_visit_rate=round(effective_visit_rate, 2),
+        lead_count=lead_count,
+        opportunity_count=opportunity_count,
+        lead_mining_rate=round(lead_mining_rate, 2),
+        lead_conversion_rate=round(lead_conversion_rate, 2),
+    )
+
+
+def _append_performance_total_row(
+    statistics: List[SalesUnitPerformanceStatistics],
+) -> List[SalesUnitPerformanceStatistics]:
+    if not statistics:
+        return statistics
+    total_appointments = sum(s.appointments_made for s in statistics)
+    total_visits = sum(s.visits_completed for s in statistics)
+    total_decision_authority = sum(s.has_decision_authority for s in statistics)
+    total_leads = sum(s.lead_count for s in statistics)
+    total_opportunities = sum(s.opportunity_count for s in statistics)
+
+    total_effective_appointment_rate = (
+        (total_visits / total_appointments * 100) if total_appointments > 0 else 0.0
+    )
+    total_effective_visit_rate = (
+        (total_decision_authority / total_visits * 100) if total_visits > 0 else 0.0
+    )
+    total_lead_mining_rate = (
+        (total_leads / total_decision_authority * 100) if total_decision_authority > 0 else 0.0
+    )
+    total_lead_conversion_rate = (
+        (total_opportunities / total_leads * 100) if total_leads > 0 else 0.0
+    )
+
+    statistics.append(
+        SalesUnitPerformanceStatistics(
             sales_unit="总计",
             appointments_made=total_appointments,
             visits_completed=total_visits,
@@ -1484,70 +1488,206 @@ def get_sales_unit_performance_statistics(
             lead_count=total_leads,
             opportunity_count=total_opportunities,
             lead_mining_rate=round(total_lead_mining_rate, 2),
-            lead_conversion_rate=round(total_lead_conversion_rate, 2)
-        ))
-    
-    # 生成成员明细统计（仅组长且include_member_details=True时）
-    member_details = None
-    if include_member_details and current_role.role == UserRole.TEAM_LEADER and member_ids_to_filter:
-        from app.schemas.statistics import MemberDetailStatistics
-        member_details = []
-        for member_id in member_ids_to_filter:
-            member = db.query(User).filter(User.id == member_id).first()
-            if not member:
-                continue
+            lead_conversion_rate=round(total_lead_conversion_rate, 2),
+        )
+    )
+    return statistics
 
-            # 获取该成员的工单（仅本组，含联席组长名下）
-            member_work_order_query = db.query(WorkOrder).filter(
-                WorkOrder.member_id == member_id,
-                work_orders_visible_to_team_leader_filter(db, current_user.id),
+
+def _get_performance_by_group(
+    db: Session,
+    current_user: User,
+    current_role,
+    group_id: Optional[int],
+    start_date: Optional[date],
+    end_date: Optional[date],
+) -> List[SalesUnitPerformanceStatistics]:
+    """按小组展示：工单 team_leader_id 对应用户在分组管理中所任组长的 FDE 组名汇总。"""
+    from app.api.work_orders import build_team_leader_id_to_group_name_map
+
+    task_ids_for_scope = _get_performance_task_ids_for_scope(
+        db, current_user, current_role, group_id, start_date, end_date
+    )
+    if not task_ids_for_scope:
+        return []
+
+    perf_wo_scope = apply_work_order_statistics_scope(db, current_user, current_role, group_id)
+    work_order_query = perf_wo_scope.filter(WorkOrder.task_id.in_(task_ids_for_scope))
+    work_order_query = _apply_performance_work_order_query_filters(
+        work_order_query, start_date, end_date
+    )
+
+    work_orders = work_order_query.all()
+    if not work_orders:
+        return []
+
+    team_leader_group_map = build_team_leader_id_to_group_name_map(
+        db, [wo.team_leader_id for wo in work_orders if wo.team_leader_id]
+    )
+    buckets: Dict[str, List[WorkOrder]] = defaultdict(list)
+    for wo in work_orders:
+        if wo.team_leader_id:
+            fde_group = team_leader_group_map.get(wo.team_leader_id) or "未分组"
+        else:
+            fde_group = "未分组"
+        buckets[fde_group].append(wo)
+
+    statistics: List[SalesUnitPerformanceStatistics] = []
+    for group_name in sorted(buckets.keys()):
+        row = _compute_performance_row_for_work_orders(
+            db,
+            current_user,
+            current_role,
+            group_id,
+            group_name,
+            buckets[group_name],
+            start_date,
+            end_date,
+        )
+        if row and row.appointments_made > 0:
+            statistics.append(row)
+
+    return _append_performance_total_row(statistics)
+
+
+def _get_performance_by_task(
+    db: Session,
+    current_user: User,
+    current_role,
+    group_id: Optional[int],
+    start_date: Optional[date],
+    end_date: Optional[date],
+) -> List[SalesUnitPerformanceStatistics]:
+    """按专项任务维度聚合绩效。"""
+    from sqlalchemy.orm import joinedload
+
+    task_ids_for_scope = _get_performance_task_ids_for_scope(
+        db, current_user, current_role, group_id, start_date, end_date
+    )
+    if not task_ids_for_scope:
+        return []
+
+    perf_wo_scope = apply_work_order_statistics_scope(db, current_user, current_role, group_id)
+    work_order_query = perf_wo_scope.filter(WorkOrder.task_id.in_(task_ids_for_scope))
+    work_order_query = _apply_performance_work_order_query_filters(
+        work_order_query, start_date, end_date
+    )
+
+    work_orders = work_order_query.options(joinedload(WorkOrder.task)).all()
+    if not work_orders:
+        return []
+
+    buckets: Dict[str, List[WorkOrder]] = defaultdict(list)
+    for wo in work_orders:
+        if wo.task and wo.task.task_name:
+            label = wo.task.task_name
+        else:
+            label = f"任务#{wo.task_id}"
+        buckets[label].append(wo)
+
+    statistics: List[SalesUnitPerformanceStatistics] = []
+    for label in sorted(buckets.keys()):
+        row = _compute_performance_row_for_work_orders(
+            db,
+            current_user,
+            current_role,
+            group_id,
+            label,
+            buckets[label],
+            start_date,
+            end_date,
+        )
+        if row and row.appointments_made > 0:
+            statistics.append(row)
+
+    return _append_performance_total_row(statistics)
+
+
+def _build_performance_member_details(
+    db: Session,
+    current_user: User,
+    current_role,
+    group_id: Optional[int],
+    member_ids_to_filter: List[int],
+    start_date: Optional[date],
+    end_date: Optional[date],
+):
+    from app.schemas.statistics import MemberDetailStatistics
+
+    member_details = []
+    for member_id in member_ids_to_filter:
+        member = db.query(User).filter(User.id == member_id).first()
+        if not member:
+            continue
+
+        member_work_order_query = db.query(WorkOrder).filter(
+            WorkOrder.member_id == member_id,
+            WorkOrder.status != WorkOrderStatus.CANCELLED.value,
+            work_orders_visible_to_team_leader_filter(db, current_user.id),
+        )
+        member_work_order_query = _apply_performance_work_order_query_filters(
+            member_work_order_query, start_date, end_date
+        )
+        member_work_orders = member_work_order_query.all()
+        member_work_order_ids = [wo.id for wo in member_work_orders]
+        member_task_ids = [wo.task_id for wo in member_work_orders]
+
+        if not member_task_ids:
+            continue
+
+        member_visit_log_query = db.query(VisitLog).filter(
+            VisitLog.work_order_id.in_(member_work_order_ids)
+        )
+        if start_date:
+            member_visit_log_query = member_visit_log_query.filter(
+                func.date(VisitLog.visit_date) >= start_date
             )
-            if start_date:
-                member_work_order_query = member_work_order_query.filter(func.date(WorkOrder.created_at) >= start_date)
-            if end_date:
-                member_work_order_query = member_work_order_query.filter(func.date(WorkOrder.created_at) <= end_date)
-            member_work_orders = member_work_order_query.all()
-            member_work_order_ids = [wo.id for wo in member_work_orders]
-            member_task_ids = [wo.task_id for wo in member_work_orders]
-            
-            if not member_task_ids:
-                continue
-            
-            # 获取该成员的拜访日志
-            member_visit_log_query = db.query(VisitLog).filter(VisitLog.work_order_id.in_(member_work_order_ids))
-            if start_date:
-                member_visit_log_query = member_visit_log_query.filter(func.date(VisitLog.visit_date) >= start_date)
-            if end_date:
-                member_visit_log_query = member_visit_log_query.filter(func.date(VisitLog.visit_date) <= end_date)
-            member_visit_logs = member_visit_log_query.all()
-            member_visit_log_ids = [vl.id for vl in member_visit_logs]
-            
-            # 计算各项指标
-            member_appointments = len(member_work_orders)
-            member_visits = len(member_visit_logs)
-            member_decision_authority = sum(
-                1
-                for vl in member_visit_logs
-                if visit_log_counts_as_has_authority(vl.has_decision_authority)
+        if end_date:
+            member_visit_log_query = member_visit_log_query.filter(
+                func.date(VisitLog.visit_date) <= end_date
             )
-            member_leads = sum(
-                1 for vl in member_visit_logs if visit_log_counts_as_has_clue(vl.has_clue)
+        member_visit_logs = member_visit_log_query.all()
+
+        member_appointments = len(member_work_orders)
+        member_visits = len(member_visit_logs)
+        member_decision_authority = sum(
+            1
+            for vl in member_visit_logs
+            if visit_log_counts_as_has_authority(vl.has_decision_authority)
+        )
+        member_leads = sum(
+            1 for vl in member_visit_logs if visit_log_counts_as_has_clue(vl.has_clue)
+        )
+        member_opportunity_query = apply_opportunity_statistics_scope(
+            db, current_user, current_role, group_id
+        ).filter(Opportunity.task_id.in_(member_task_ids))
+        if start_date:
+            member_opportunity_query = member_opportunity_query.filter(
+                func.date(Opportunity.created_at) >= start_date
             )
-            member_opportunity_query = apply_opportunity_statistics_scope(
-                db, current_user, current_role, group_id
-            ).filter(Opportunity.task_id.in_(member_task_ids))
-            if start_date:
-                member_opportunity_query = member_opportunity_query.filter(func.date(Opportunity.created_at) >= start_date)
-            if end_date:
-                member_opportunity_query = member_opportunity_query.filter(func.date(Opportunity.created_at) <= end_date)
-            member_opportunities = member_opportunity_query.count()
-            
-            member_effective_appointment_rate = (member_visits / member_appointments * 100) if member_appointments > 0 else 0.0
-            member_effective_visit_rate = (member_decision_authority / member_visits * 100) if member_visits > 0 else 0.0
-            member_lead_mining_rate = (member_leads / member_decision_authority * 100) if member_decision_authority > 0 else 0.0
-            member_lead_conversion_rate = (member_opportunities / member_leads * 100) if member_leads > 0 else 0.0
-            
-            member_details.append(MemberDetailStatistics(
+        if end_date:
+            member_opportunity_query = member_opportunity_query.filter(
+                func.date(Opportunity.created_at) <= end_date
+            )
+        member_opportunities = member_opportunity_query.count()
+
+        member_effective_appointment_rate = (
+            (member_visits / member_appointments * 100) if member_appointments > 0 else 0.0
+        )
+        member_effective_visit_rate = (
+            (member_decision_authority / member_visits * 100) if member_visits > 0 else 0.0
+        )
+        member_lead_mining_rate = (
+            (member_leads / member_decision_authority * 100)
+            if member_decision_authority > 0
+            else 0.0
+        )
+        member_lead_conversion_rate = (
+            (member_opportunities / member_leads * 100) if member_leads > 0 else 0.0
+        )
+
+        member_details.append(
+            MemberDetailStatistics(
                 member_id=member.id,
                 member_name=member.real_name or member.username,
                 appointments_made=member_appointments,
@@ -1558,9 +1698,108 @@ def get_sales_unit_performance_statistics(
                 lead_count=member_leads,
                 opportunity_count=member_opportunities,
                 lead_mining_rate=round(member_lead_mining_rate, 2),
-                lead_conversion_rate=round(member_lead_conversion_rate, 2)
-            ))
+                lead_conversion_rate=round(member_lead_conversion_rate, 2),
+            )
+        )
+    return member_details or None
+
+
+def get_sales_unit_performance_statistics(
+    db: Session, 
+    current_user: User, 
+    current_role,
+    group_id: Optional[int] = None,
+    include_member_details: bool = False,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    dimension: str = "customer_source",
+) -> Tuple[List[SalesUnitPerformanceStatistics], Optional[List]]:
+    """获取销售单位绩效统计（基于当前激活角色）
     
+    dimension: customer_source（客户来源）| group（小组）| task（专项任务）
+    
+    Returns:
+        (统计列表, 成员明细列表)
+    """
+    if dimension not in PERFORMANCE_DIMENSIONS:
+        dimension = "customer_source"
+
+    if current_role.role == UserRole.MANAGER and group_id:
+        member_ids_to_filter = get_group_member_ids(db, group_id)
+        if not member_ids_to_filter:
+            return [], None
+    elif current_role.role == UserRole.MEMBER:
+        member_ids_to_filter = [current_user.id]
+    elif current_role.role == UserRole.TEAM_LEADER:
+        member_ids_to_filter = get_user_group_members(db, current_user.id)
+    else:
+        member_ids_to_filter = None
+
+    if dimension == "group":
+        statistics = _get_performance_by_group(
+            db, current_user, current_role, group_id, start_date, end_date
+        )
+        member_details = None
+        if include_member_details and current_role.role == UserRole.TEAM_LEADER and member_ids_to_filter:
+            member_details = _build_performance_member_details(
+                db, current_user, current_role, group_id, member_ids_to_filter, start_date, end_date
+            )
+        return statistics, member_details
+
+    if dimension == "task":
+        statistics = _get_performance_by_task(
+            db, current_user, current_role, group_id, start_date, end_date
+        )
+        member_details = None
+        if include_member_details and current_role.role == UserRole.TEAM_LEADER and member_ids_to_filter:
+            member_details = _build_performance_member_details(
+                db, current_user, current_role, group_id, member_ids_to_filter, start_date, end_date
+            )
+        return statistics, member_details
+
+    task_ids_for_scope = _get_performance_task_ids_for_scope(
+        db, current_user, current_role, group_id, start_date, end_date
+    )
+    if not task_ids_for_scope:
+        return [], None
+
+    customer_sources = _get_customer_sources_for_performance(db, task_ids_for_scope)
+    if not customer_sources:
+        return [], None
+
+    statistics = []
+    for sales_unit in customer_sources:
+        work_orders = _get_work_orders_for_customer_source(
+            db,
+            current_user,
+            current_role,
+            group_id,
+            task_ids_for_scope,
+            sales_unit,
+            start_date,
+            end_date,
+        )
+        row = _compute_performance_row_for_work_orders(
+            db,
+            current_user,
+            current_role,
+            group_id,
+            sales_unit,
+            work_orders,
+            start_date,
+            end_date,
+        )
+        if row and row.appointments_made > 0:
+            statistics.append(row)
+
+    statistics = _append_performance_total_row(statistics)
+
+    member_details = None
+    if include_member_details and current_role.role == UserRole.TEAM_LEADER and member_ids_to_filter:
+        member_details = _build_performance_member_details(
+            db, current_user, current_role, group_id, member_ids_to_filter, start_date, end_date
+        )
+
     return statistics, member_details
 
 
@@ -1641,6 +1880,10 @@ def get_requirement_direction_statistics(
 def get_sales_unit_performance_statistics_api(
     group_id: Optional[int] = Query(None, description="分组ID（仅总管可用）"),
     include_member_details: bool = Query(False, description="是否包含成员明细（仅组长可用）"),
+    dimension: str = Query(
+        "customer_source",
+        description="统计维度：customer_source（客户来源）/ group（小组）/ task（专项任务）",
+    ),
     start_date: Optional[str] = Query(None, description="开始日期（YYYY-MM-DD）"),
     end_date: Optional[str] = Query(None, description="结束日期（YYYY-MM-DD）"),
     user_role: tuple = Depends(get_current_role),
@@ -1648,6 +1891,15 @@ def get_sales_unit_performance_statistics_api(
 ):
     """获取销售单位绩效统计（基于当前激活角色）"""
     current_user, current_role = user_role
+
+    if dimension not in PERFORMANCE_DIMENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"dimension 必须是 {', '.join(PERFORMANCE_DIMENSIONS)} 之一",
+        )
+
+    if dimension == "group":
+        _assert_performance_group_dimension_allowed(current_role)
     
     # 权限验证
     if group_id and current_role.role != UserRole.MANAGER:
@@ -1677,7 +1929,14 @@ def get_sales_unit_performance_statistics_api(
             raise HTTPException(status_code=400, detail="结束日期格式错误，应为YYYY-MM-DD")
     
     statistics, member_details = get_sales_unit_performance_statistics(
-        db, current_user, current_role, group_id, include_member_details, start_date_obj, end_date_obj
+        db,
+        current_user,
+        current_role,
+        group_id,
+        include_member_details,
+        start_date_obj,
+        end_date_obj,
+        dimension,
     )
     requirement_directions = get_requirement_direction_statistics(
         db, current_user, current_role, group_id, start_date_obj, end_date_obj
@@ -1685,6 +1944,7 @@ def get_sales_unit_performance_statistics_api(
     
     return SalesUnitPerformanceResponse(
         statistics=statistics,
+        dimension=dimension,
         requirement_directions=requirement_directions,
         member_details=member_details
     )

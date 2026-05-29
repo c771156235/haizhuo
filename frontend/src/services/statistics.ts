@@ -83,6 +83,7 @@ export interface SalesUnitStatistics {
 
 export interface SalesUnitPerformanceStatistics {
   sales_unit: string
+  group_name?: string | null  // 小组名称（group 维度）
   appointments_made: number  // 已预约（工单数量）
   visits_completed: number  // 已拜访（拜访日志数量）
   effective_appointment_rate: number  // 有效预约率
@@ -118,8 +119,11 @@ export interface MemberDetailStatistics {
   lead_conversion_rate: number
 }
 
+export type PerformanceDimension = 'customer_source' | 'group' | 'task'
+
 export interface SalesUnitPerformanceResponse {
   statistics: SalesUnitPerformanceStatistics[]
+  dimension?: PerformanceDimension
   requirement_directions: RequirementDirectionGroupStatistics[]
   member_details?: MemberDetailStatistics[]
 }
@@ -256,12 +260,14 @@ export const statisticsService = {
   getSalesUnitPerformanceStatistics: async (params?: {
     group_id?: number
     include_member_details?: boolean
+    dimension?: PerformanceDimension
     start_date?: string
     end_date?: string
   }): Promise<SalesUnitPerformanceResponse> => {
     const queryParams: any = {}
     if (params?.group_id) queryParams.group_id = params.group_id
     if (params?.include_member_details) queryParams.include_member_details = params.include_member_details
+    if (params?.dimension) queryParams.dimension = params.dimension
     if (params?.start_date) queryParams.start_date = params.start_date
     if (params?.end_date) queryParams.end_date = params.end_date
     return apiClient.get(API_ENDPOINTS.STATISTICS_SALES_UNITS_PERFORMANCE, {

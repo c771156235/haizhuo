@@ -14,4 +14,10 @@ export { GroupSelector } from './GroupSelector'
 export { MemberDetailToggle } from './MemberDetailToggle'
 export { DateRangeSelector } from './DateRangeSelector'
 export type { DateRangePreset } from './DateRangeSelector'
+export {
+  PerformanceDimensionSelector,
+  PERFORMANCE_DIMENSION_LABELS,
+  PERFORMANCE_DIMENSION_TITLES,
+} from './PerformanceDimensionSelector'
+export type { PerformanceDimension } from './PerformanceDimensionSelector'
 
